@@ -1,0 +1,13 @@
+# dependencies
+node_modules/
+
+# partykit local dev / build state
+.partykit/
+
+# build output
+dist/
+
+# logs & os cruft
+*.log
+.DS_Store
+Thumbs.db

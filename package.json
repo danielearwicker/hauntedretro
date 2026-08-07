@@ -1,0 +1,14 @@
+{
+  "name": "retrogame",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Realtime multiplayer explorable map — a gamified sprint retro, built on PartyKit",
+  "scripts": {
+    "dev": "partykit dev",
+    "deploy": "partykit deploy"
+  },
+  "devDependencies": {
+    "partykit": "latest",
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>Retro Game — shared world</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1116; }
+      body {
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        color: #e6e9ef;
+      }
+      #game { display: block; width: 100vw; height: 100vh; touch-action: none; }
+
+      .hud {
+        position: fixed; top: 12px; left: 12px; z-index: 10;
+        background: rgba(20, 24, 33, 0.82);
+        backdrop-filter: blur(6px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 12px 14px;
+        max-width: 300px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+      }
+      .hud h1 { font-size: 14px; margin: 0 0 8px; letter-spacing: 0.4px; }
+      .hud .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+      .hud input {
+        flex: 1; min-width: 0;
+        background: #0e1116; color: #e6e9ef;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 8px; padding: 6px 8px; font-size: 13px;
+      }
+      .hud .hint { font-size: 12px; color: #9aa4b2; line-height: 1.6; margin-top: 8px; }
+      .hud kbd {
+        background: #232936; border: 1px solid rgba(255, 255, 255, 0.14);
+        border-bottom-width: 2px; border-radius: 5px;
+        padding: 1px 6px; font-size: 11px; font-family: inherit;
+      }
+      .pill {
+        display: inline-block; padding: 2px 8px; border-radius: 999px;
+        font-size: 12px; background: #232936; color: #9aa4b2;
+      }
+      .pill b { color: #e6e9ef; }
+
+      #status {
+        position: fixed; bottom: 12px; left: 12px; z-index: 10;
+        font-size: 12px; color: #9aa4b2;
+      }
+      #status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ff6b6b; margin-right: 6px; vertical-align: middle; }
+      #status.online .dot { background: #1dd1a1; }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+
+    <div class="hud">
+      <h1>🎈 Retro Game</h1>
+      <div class="row">
+        <input id="name" placeholder="Your name" maxlength="24" />
+      </div>
+      <div class="row">
+        <span class="pill">Room: <b id="roomName">retro</b></span>
+        <span class="pill"><b id="count">1</b> online</span>
+        <span class="pill">You hold <b id="myParch">0</b> 📜</span>
+      </div>
+      <div class="hint">
+        <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows to move<br />
+        <kbd>E</kbd> grab — a <b>quill</b> ✒️, a <b>parchment</b> 📜, or take one
+        parchment from a player who has more than you<br />
+        <kbd>Q</kbd> drop your quill<br />
+        The number by each avatar is how many parchments they hold.
+      </div>
+    </div>
+
+    <div id="status"><span class="dot"></span><span id="statusText">connecting…</span></div>
+
+    <script>
+      // ---- Connection ---------------------------------------------------
+      const ROOM = (location.hash.replace("#", "") || "retro").slice(0, 40);
+      document.getElementById("roomName").textContent = ROOM;
+
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const WS_URL = `${proto}://${location.host}/parties/main/${ROOM}`;
+
+      const GRAB_RANGE = 64; // must match the server
+
+      // ---- Local game state (mirror of the server) ---------------------
+      let myId = null;
+      let world = { w: 3000, h: 2500 };
+      let players = {};    // id -> player { x, y, rx, ry, carrying, parchments, ... }
+      let quills = {};     // id -> quill { x, y, heldBy }
+      let parchments = []; // scattered on the ground: [{ id, x, y }]
+
+      // ---- Map (received from the server on init) ----------------------
+      let walls = [];      // solid rectangles: [{ x, y, w, h }]
+      let areas = [];      // floors: [{ name?, x, y, w, h }]
+      const PLAYER_R = 14; // avatar radius, used for wall collision
+
+      // Floor tint + label colour per named room; corridors use the default.
+      const ROOM_STYLE = {
+        Lobby:       { fill: "#2a2320", label: "#c9a27a" },
+        Garden:      { fill: "#17301f", label: "#5fd08a" },
+        Scriptorium: { fill: "#241a30", label: "#b18cff" },
+        Library:     { fill: "#20262e", label: "#8fb7d8" },
+        Workshop:    { fill: "#2e241a", label: "#d8a86a" },
+      };
+      const CORRIDOR_FILL = "#1a1f27";
+
+      // ---- Canvas / camera ---------------------------------------------
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+      let dpr = Math.min(window.devicePixelRatio || 1, 2);
+      function resize() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.floor(innerWidth * dpr);
+        canvas.height = Math.floor(innerHeight * dpr);
+        canvas.style.width = innerWidth + "px";
+        canvas.style.height = innerHeight + "px";
+      }
+      addEventListener("resize", resize);
+      resize();
+
+      const cam = { x: 0, y: 0 };
+
+      // ---- Input --------------------------------------------------------
+      const keys = {};
+      const nameInput = document.getElementById("name");
+      addEventListener("keydown", (e) => {
+        if (document.activeElement === nameInput) return;
+        keys[e.key.toLowerCase()] = true;
+        if (e.key.toLowerCase() === "e") send({ type: "grab" });     // server decides what
+        if (e.key.toLowerCase() === "q") tryDrop();
+        if (["arrowup", "arrowdown", "arrowleft", "arrowright"].includes(e.key.toLowerCase())) e.preventDefault();
+      });
+      addEventListener("keyup", (e) => { keys[e.key.toLowerCase()] = false; });
+
+      nameInput.addEventListener("change", () => {
+        send({ type: "setName", name: nameInput.value.trim() || "Guest" });
+      });
+
+      // ---- WebSocket wiring --------------------------------------------
+      let socket;
+      function connect() {
+        socket = new WebSocket(WS_URL);
+        socket.addEventListener("open", () => setStatus(true, "connected"));
+        socket.addEventListener("close", () => {
+          setStatus(false, "reconnecting…");
+          setTimeout(connect, 1000);
+        });
+        socket.addEventListener("message", (ev) => handle(JSON.parse(ev.data)));
+      }
+      function send(obj) {
+        if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(obj));
+      }
+
+      function handle(msg) {
+        switch (msg.type) {
+          case "init":
+            myId = msg.you;
+            if (msg.map) { walls = msg.map.walls || []; areas = msg.map.areas || []; }
+            applySnapshot(msg);
+            if (nameInput.value.trim()) send({ type: "setName", name: nameInput.value.trim() });
+            break;
+          case "snapshot":
+            applySnapshot(msg);
+            break;
+          case "playerMoved": {
+            const p = players[msg.id];
+            if (p) { p.x = msg.x; p.y = msg.y; } // target only; render eases toward it
+            break;
+          }
+        }
+      }
+
+      // Merge a full snapshot WITHOUT clobbering my own live position or
+      // other players' in-progress interpolation.
+      function applySnapshot(s) {
+        if (!s || !s.players || !s.quills || !s.parchments) return; // ignore malformed/stale msgs
+        world = s.world;
+        quills = Object.fromEntries(s.quills.map((q) => [q.id, q]));
+        parchments = s.parchments;
+
+        const merged = {};
+        for (const id in s.players) {
+          const np = s.players[id];
+          const old = players[id];
+          if (id === myId && old) {
+            // keep my authoritative local position + camera feel; take counts from server
+            old.parchments = np.parchments;
+            old.carrying = np.carrying;
+            old.name = np.name;
+            old.color = np.color;
+            merged[id] = old;
+          } else {
+            np.rx = old ? old.rx : np.x;
+            np.ry = old ? old.ry : np.y;
+            merged[id] = np;
+          }
+        }
+        players = merged;
+
+        document.getElementById("count").textContent = Object.keys(players).length;
+        const me_ = players[myId];
+        if (me_) document.getElementById("myParch").textContent = me_.parchments;
+      }
+
+      // ---- Actions ------------------------------------------------------
+      function me() { return players[myId]; }
+
+      function ensureRender(p) {
+        if (p.rx === undefined) { p.rx = p.x; p.ry = p.y; }
+        return p;
+      }
+
+      function tryDrop() {
+        const p = me();
+        if (p && p.carrying) send({ type: "drop" });
+      }
+
+      // Mirror of the server's grab logic, used ONLY to draw the E hint.
+      function nearestTarget() {
+        const p = me();
+        if (!p) return null;
+        let best = null, bestD = GRAB_RANGE + 1, kind = null;
+        if (!p.carrying) {
+          for (const id in quills) {
+            const q = quills[id];
+            if (q.heldBy) continue;
+            const d = Math.hypot(q.x - p.x, q.y - p.y);
+            if (d <= GRAB_RANGE && d < bestD) { bestD = d; best = { x: q.x, y: q.y }; kind = "quill"; }
+          }
+        }
+        for (const pc of parchments) {
+          const d = Math.hypot(pc.x - p.x, pc.y - p.y);
+          if (d <= GRAB_RANGE && d < bestD) { bestD = d; best = { x: pc.x, y: pc.y }; kind = "parch"; }
+        }
+        for (const id in players) {
+          if (id === myId) continue;
+          const o = players[id];
+          if (o.parchments > p.parchments) {
+            const ox = o.rx ?? o.x, oy = o.ry ?? o.y;
+            const d = Math.hypot(ox - p.x, oy - p.y);
+            if (d <= GRAB_RANGE && d < bestD) { bestD = d; best = { x: ox, y: oy }; kind = "steal"; }
+          }
+        }
+        return best ? { ...best, kind } : null;
+      }
+
+      // Resolve the player circle (radius PLAYER_R) out of any solid wall.
+      // Two passes so we settle cleanly in inside corners.
+      function collideWalls(p) {
+        for (let pass = 0; pass < 2; pass++) {
+          for (const w of walls) {
+            const insideX = p.x > w.x && p.x < w.x + w.w;
+            const insideY = p.y > w.y && p.y < w.y + w.h;
+            if (insideX && insideY) {
+              // centre is inside the rect — eject along the shallowest axis
+              const left = p.x - w.x, right = w.x + w.w - p.x;
+              const top = p.y - w.y, bottom = w.y + w.h - p.y;
+              const m = Math.min(left, right, top, bottom);
+              if (m === left) p.x = w.x - PLAYER_R;
+              else if (m === right) p.x = w.x + w.w + PLAYER_R;
+              else if (m === top) p.y = w.y - PLAYER_R;
+              else p.y = w.y + w.h + PLAYER_R;
+              continue;
+            }
+            // nearest point on the rect to the circle centre
+            const nx = Math.max(w.x, Math.min(p.x, w.x + w.w));
+            const ny = Math.max(w.y, Math.min(p.y, w.y + w.h));
+            const dx = p.x - nx, dy = p.y - ny;
+            const d2 = dx * dx + dy * dy;
+            if (d2 < PLAYER_R * PLAYER_R) {
+              const d = Math.sqrt(d2) || 0.0001;
+              const push = PLAYER_R - d;
+              p.x += (dx / d) * push;
+              p.y += (dy / d) * push;
+            }
+          }
+        }
+      }
+
+      // ---- Movement + send throttle ------------------------------------
+      const SPEED = 3.6;
+      let lastSent = 0;
+      function step() {
+        const p = me();
+        if (p) {
+          let dx = 0, dy = 0;
+          if (keys["w"] || keys["arrowup"]) dy -= 1;
+          if (keys["s"] || keys["arrowdown"]) dy += 1;
+          if (keys["a"] || keys["arrowleft"]) dx -= 1;
+          if (keys["d"] || keys["arrowright"]) dx += 1;
+          if (dx || dy) {
+            const len = Math.hypot(dx, dy) || 1;
+            p.x = Math.max(0, Math.min(world.w, p.x + (dx / len) * SPEED));
+            p.y = Math.max(0, Math.min(world.h, p.y + (dy / len) * SPEED));
+            collideWalls(p); // push back out of any wall we walked into
+            if (p.carrying && quills[p.carrying]) {
+              quills[p.carrying].x = p.x;
+              quills[p.carrying].y = p.y - 24;
+            }
+            const now = performance.now();
+            if (now - lastSent > 60) {
+              send({ type: "move", x: p.x, y: p.y });
+              lastSent = now;
+            }
+          }
+          const targetX = p.x - innerWidth / 2;
+          const targetY = p.y - innerHeight / 2;
+          cam.x += (targetX - cam.x) * 0.12;
+          cam.y += (targetY - cam.y) * 0.12;
+          cam.x = Math.max(-100, Math.min(world.w - innerWidth + 100, cam.x));
+          cam.y = Math.max(-100, Math.min(world.h - innerHeight + 100, cam.y));
+        }
+
+        // Smoothly interpolate every OTHER player toward its target position.
+        for (const id in players) {
+          const q = players[id];
+          ensureRender(q);
+          if (id === myId) { q.rx = q.x; q.ry = q.y; continue; }
+          const dx = q.x - q.rx, dy = q.y - q.ry;
+          if (Math.hypot(dx, dy) > 240) { q.rx = q.x; q.ry = q.y; }
+          else { q.rx += dx * 0.25; q.ry += dy * 0.25; }
+        }
+
+        draw();
+        requestAnimationFrame(step);
+      }
+
+      // ---- Rendering ----------------------------------------------------
+      function draw() {
+        ctx.save();
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, innerWidth, innerHeight);
+        ctx.fillStyle = "#0e1116";
+        ctx.fillRect(0, 0, innerWidth, innerHeight);
+
+        ctx.translate(-cam.x, -cam.y);
+
+        drawGrid();
+        drawAreas();
+        drawWalls();
+        drawGround();
+        drawPlayers();
+        drawGrabHint();
+
+        ctx.restore();
+      }
+
+      function drawGrid() {
+        ctx.strokeStyle = "rgba(255,255,255,0.04)";
+        ctx.lineWidth = 1;
+        const g = 80;
+        for (let x = 0; x <= world.w; x += g) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, world.h); ctx.stroke(); }
+        for (let y = 0; y <= world.h; y += g) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(world.w, y); ctx.stroke(); }
+      }
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+      }
+
+      function drawAreas() {
+        for (const a of areas) {
+          const style = a.name && ROOM_STYLE[a.name];
+          ctx.fillStyle = style ? style.fill : CORRIDOR_FILL;
+          roundRect(a.x, a.y, a.w, a.h, a.name ? 10 : 4);
+          ctx.fill();
+          if (a.name && style) {
+            ctx.fillStyle = style.label;
+            ctx.font = "600 22px system-ui, sans-serif";
+            ctx.fillText(a.name, a.x + 20, a.y + 34);
+          }
+        }
+      }
+
+      function drawWalls() {
+        for (const w of walls) {
+          ctx.fillStyle = "#454d5e";
+          ctx.fillRect(w.x, w.y, w.w, w.h);
+          // subtle top highlight so walls read as solid, not flat blocks
+          ctx.fillStyle = "rgba(255,255,255,0.07)";
+          ctx.fillRect(w.x, w.y, w.w, Math.min(3, w.h));
+        }
+      }
+
+      function drawWorldBounds() {
+        ctx.strokeStyle = "rgba(255,255,255,0.10)";
+        ctx.lineWidth = 3;
+        roundRect(0, 0, world.w, world.h, 8);
+        ctx.stroke();
+      }
+
+      // A little scroll/parchment icon centred on (x, y). s scales it.
+      function drawScroll(x, y, s) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.fillStyle = "#d9c89a";
+        ctx.strokeStyle = "#a8956a";
+        ctx.lineWidth = 1.5 * s;
+        roundRect(-6 * s, -8 * s, 12 * s, 16 * s, 2 * s);
+        ctx.fill();
+        ctx.stroke();
+        ctx.strokeStyle = "#8a7a52";
+        ctx.lineWidth = 1 * s;
+        for (let i = -1; i <= 1; i++) {
+          ctx.beginPath();
+          ctx.moveTo(-3.5 * s, i * 4 * s);
+          ctx.lineTo(3.5 * s, i * 4 * s);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // A little feather-quill icon centred on (x, y).
+      function drawQuill(x, y, s) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(-Math.PI / 4);
+        ctx.fillStyle = "#eee6d2";
+        ctx.beginPath();
+        ctx.ellipse(0, -3 * s, 3 * s, 9 * s, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#b9ad90";
+        ctx.lineWidth = 2 * s;
+        ctx.beginPath();
+        ctx.moveTo(0, -6 * s);
+        ctx.lineTo(0, 11 * s);
+        ctx.stroke();
+        ctx.fillStyle = "#2b2b2b";
+        ctx.beginPath();
+        ctx.moveTo(-2 * s, 10 * s);
+        ctx.lineTo(2 * s, 10 * s);
+        ctx.lineTo(0, 14 * s);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+
+      function drawGround() {
+        // scattered parchments
+        for (const pc of parchments) drawScroll(pc.x, pc.y, 1);
+        // quills lying on the ground (not held)
+        for (const id in quills) {
+          const q = quills[id];
+          if (q.heldBy) continue; // held quills are drawn with their holder
+          ctx.save();
+          ctx.shadowColor = "rgba(255,255,255,0.5)";
+          ctx.shadowBlur = 10;
+          drawQuill(q.x, q.y, 1);
+          ctx.restore();
+        }
+      }
+
+      function drawPlayers() {
+        for (const id in players) {
+          const p = players[id];
+          const x = p.rx ?? p.x, y = p.ry ?? p.y;
+          // shadow
+          ctx.fillStyle = "rgba(0,0,0,0.35)";
+          ctx.beginPath(); ctx.ellipse(x, y + 16, 14, 6, 0, 0, Math.PI * 2); ctx.fill();
+          // body
+          ctx.fillStyle = p.color;
+          ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI * 2); ctx.fill();
+          if (id === myId) {
+            ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.5;
+            ctx.beginPath(); ctx.arc(x, y, 17, 0, Math.PI * 2); ctx.stroke();
+          }
+          // carried quill above the head
+          if (p.carrying && quills[p.carrying]) drawQuill(x, y - 26, 1);
+          // name
+          ctx.fillStyle = "#e6e9ef";
+          ctx.font = "600 13px system-ui, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(p.name || "Guest", x, y - 34);
+          // parchment count badge just below the avatar
+          drawParchmentBadge(x, y + 30, p.parchments || 0);
+          ctx.textAlign = "left";
+        }
+      }
+
+      function drawParchmentBadge(x, y, count) {
+        const w = 40, h = 20;
+        ctx.fillStyle = "rgba(20,24,33,0.9)";
+        ctx.strokeStyle = "rgba(217,200,154,0.7)";
+        ctx.lineWidth = 1.5;
+        roundRect(x - w / 2, y - h / 2, w, h, 10);
+        ctx.fill(); ctx.stroke();
+        drawScroll(x - 9, y, 0.7);
+        ctx.fillStyle = "#e6e9ef";
+        ctx.font = "700 13px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(String(count), x + 8, y + 4);
+      }
+
+      function drawGrabHint() {
+        const t = nearestTarget();
+        if (!t) return;
+        const r = t.kind === "steal" ? 22 : 18;
+        ctx.strokeStyle = t.kind === "steal" ? "rgba(255,209,102,0.9)" : "rgba(255,255,255,0.75)";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.arc(t.x, t.y, r, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = "rgba(255,255,255,0.9)";
+        ctx.font = "600 12px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        const label = t.kind === "quill" ? "E — take quill"
+                    : t.kind === "parch" ? "E — take parchment"
+                    : "E — take a parchment";
+        ctx.fillText(label, t.x, t.y - r - 6);
+        ctx.textAlign = "left";
+      }
+
+      // ---- Status line --------------------------------------------------
+      function setStatus(online, text) {
+        const el = document.getElementById("status");
+        el.classList.toggle("online", online);
+        document.getElementById("statusText").textContent = text;
+      }
+
+      // ---- Go -----------------------------------------------------------
+      connect();
+      requestAnimationFrame(step);
+    </script>
+  </body>
+</html>

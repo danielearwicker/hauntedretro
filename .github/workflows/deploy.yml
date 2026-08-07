@@ -9,6 +9,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 10 # fail fast instead of hanging (e.g. on a missing/blocked token)
     steps:
       - uses: actions/checkout@v4
         with:

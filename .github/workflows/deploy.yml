@@ -21,8 +21,10 @@ jobs:
       - run: npx wrangler deploy
         env:
           # Encrypted GitHub Actions secrets (Settings -> Secrets and
-          # variables -> Actions). Create an API token with the "Edit
-          # Cloudflare Workers" template; the account id is on your
-          # Cloudflare dashboard (Workers & Pages -> right sidebar).
+          # variables -> Actions).
+          # CLOUDFLARE_API_TOKEN: create at the account-scoped API Tokens page
+          #   (dash.cloudflare.com -> your account -> Manage Account -> Account
+          #   API Tokens), using the "Edit Cloudflare Workers" template.
+          # CLOUDFLARE_ACCOUNT_ID: Workers & Pages -> right-hand sidebar.
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

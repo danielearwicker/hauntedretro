@@ -1,0 +1,27 @@
+name: Deploy to PartyKit
+
+# Deploy the game to PartyKit (running on Cloudflare) on every push to main.
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+      - run: npm ci
+      - run: npx partykit deploy
+        env:
+          # Provided via encrypted GitHub Actions secrets (Settings ->
+          # Secrets and variables -> Actions). Generate with:
+          #   npx partykit@latest login && npx partykit@latest token generate
+          PARTYKIT_LOGIN: ${{ secrets.PARTYKIT_LOGIN }}
+          PARTYKIT_TOKEN: ${{ secrets.PARTYKIT_TOKEN }}

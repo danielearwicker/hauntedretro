@@ -1,7 +1,0 @@
-{
-  "$schema": "https://www.partykit.io/schema.json",
-  "name": "hauntedretro",
-  "main": "src/server.ts",
-  "serve": { "path": "public" },
-  "compatibilityDate": "2025-01-01"
-}

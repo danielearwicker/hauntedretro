@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hauntedretro",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-01",
+  // Serve the browser client (./public) as static assets. Requests that don't
+  // match a file (e.g. the /parties/... WebSocket upgrade) fall through to the
+  // Worker's fetch handler automatically.
+  "assets": { "directory": "./public" },
+  // One Durable Object per room, holding authoritative game state.
+  "durable_objects": {
+    "bindings": [{ "name": "Main", "class_name": "Main" }]
+  },
+  // SQLite-backed Durable Objects are available on the free plan.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Main"] }],
+  "observability": { "enabled": true }
+}

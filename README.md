@@ -1,12 +1,13 @@
-# Retro Game 🎈
+# Haunted Retro 🎈
 
 A realtime, multiplayer, explorable world — a starting point for a gamified
-"end of sprint retro". Walk around a shared map, see other players move in
-real time, pick up and drop gems, and solve a simple co-op puzzle together.
+"end of sprint retro". Walk around a shared walled building, see other players
+move in real time, collect quills and parchments, and (soon) write and vote on
+retro thoughts together.
 
-Built on [PartyKit](https://www.partykit.io/) (a thin layer over Cloudflare
-Durable Objects + WebSockets). **Runs entirely locally** — no cloud account
-needed until you decide to deploy.
+Built on **Cloudflare Workers + Durable Objects** via
+[`partyserver`](https://github.com/cloudflare/partykit/tree/main/packages/partyserver).
+Runs entirely locally for development; deploys to your own Cloudflare account.
 
 ## Run it locally
 
@@ -15,47 +16,52 @@ npm install
 npm run dev
 ```
 
-Then open **http://127.0.0.1:1999** in two or more browser tabs (or share your
-LAN IP with a colleague). Each tab is a player in the same world.
+`wrangler dev` runs the Worker + Durable Object locally (no Cloudflare login
+needed) and serves the client. Open **http://127.0.0.1:8787** in two or more
+browser tabs — each tab is a player in the same world. Use `#roomname` in the
+URL (e.g. `http://127.0.0.1:8787/#sprint-42`) to create separate rooms.
 
-Use `#roomname` in the URL to create separate rooms, e.g.
-`http://127.0.0.1:1999/#sprint-42` — everyone using that exact link shares a world.
+> Tip: after editing `public/index.html`, hard-refresh (Ctrl+Shift+R) — dev
+> asset serving can otherwise hand you a cached page.
 
 ## Controls
 
-- **WASD** / arrow keys — move
-- **E** — pick up the nearest gem (highlighted with a dashed ring)
-- **Q** — drop what you're carrying
-- Carry a gem to one of the three **pedestals** in the Puzzle Room (top-right)
-  and drop it there. Fill all three together to solve the puzzle.
+- **WASD** / arrow keys — move (walls block you; use the doorways)
+- **E** — grab the nearest quill, parchment, or one parchment from a player who
+  holds more than you
+- **Q** — drop your quill
 
 ## How it fits together
 
 | File | Role |
 |------|------|
-| `src/server.ts`   | Authoritative game state. One PartyKit "room" = one Durable Object holding all players, gems and pedestals. Handles join/leave, movement, pickup/drop, and the puzzle-solved check. |
-| `public/index.html` | The whole client: a `<canvas>` renderer with a follow-camera, keyboard input, and a raw WebSocket into the room. No build step. |
-| `partykit.json`   | Points PartyKit at the server entry and tells it to serve `public/` as static assets. |
+| `src/index.ts`     | The Worker. `Main` is a Durable Object (one per room) holding authoritative game state; the fetch handler routes `/parties/main/<room>` WebSocket upgrades to it. Also defines the map (rooms/corridors → generated walls). |
+| `public/index.html`| The whole client: a `<canvas>` renderer with a follow-camera, interpolation of other players, wall collision, and a WebSocket into the room. No build step. |
+| `wrangler.jsonc`   | Cloudflare config: Durable Object binding, SQLite migration, and `./public` served as static assets. |
 
-The client keeps a local mirror of the server's state and updates it from
-broadcast messages (`playerMoved`, `objectPicked`, `objectDropped`, …). The
-server is the single source of truth, so nobody can desync the shared world.
+## Deploy to Cloudflare
 
-## Deploy to your Cloudflare account (when ready)
+Deploys automatically via GitHub Actions on every push to `main`
+(`.github/workflows/deploy.yml`). It needs two repository secrets:
+
+- `CLOUDFLARE_API_TOKEN` — an API token created with the **Edit Cloudflare
+  Workers** template
+- `CLOUDFLARE_ACCOUNT_ID` — your account id (Workers & Pages → right sidebar)
+
+To deploy by hand instead:
 
 ```bash
-npx partykit login    # opens a browser to authorise with Cloudflare
-npm run deploy         # publishes to <project>.<your-account>.partykit.dev
+npx wrangler login
+npm run deploy
 ```
 
-That's the only step that touches the cloud. Everything above runs offline.
+The game goes live at `https://hauntedretro.<your-subdomain>.workers.dev`.
 
 ## Where to take it next (toward a real retro)
 
-- **Rooms as retro columns** — "Went well" / "Didn't go well" / "Actions" zones;
-  gems become sticky-notes players write on and drop into a column.
-- **Voting** — players drop tokens on notes; server tallies and broadcasts.
-- **Persistence** — store the board in Durable Object storage (`this.room.storage`)
-  so a retro survives a refresh, or push results to Supabase/a DB at the end.
-- **Identity** — swap the free-text name box for your SSO so it's tied to real
-  team members.
+- **Rooms as retro columns** — "Went well" / "Didn't go well" / "Actions";
+  parchments become the notes players write on and place in a room.
+- **Writing** — use a quill + parchment to pen a thought and drop it in the world.
+- **Voting** — players spend tokens on notes; the Durable Object tallies live.
+- **Persistence** — store the board in Durable Object storage so a retro
+  survives a refresh.

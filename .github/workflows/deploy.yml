@@ -1,6 +1,7 @@
-name: Deploy to PartyKit
+name: Deploy to Cloudflare
 
-# Deploy the game to PartyKit (running on Cloudflare) on every push to main.
+# Deploy the game to your Cloudflare account (Workers + Durable Objects) on
+# every push to main.
 on:
   push:
     branches:
@@ -9,20 +10,19 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10 # fail fast instead of hanging (e.g. on a missing/blocked token)
+    timeout-minutes: 10 # fail fast instead of hanging
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: "npm"
       - run: npm ci
-      - run: npx partykit deploy
+      - run: npx wrangler deploy
         env:
-          # Provided via encrypted GitHub Actions secrets (Settings ->
-          # Secrets and variables -> Actions). Generate with:
-          #   npx partykit@latest login && npx partykit@latest token generate
-          PARTYKIT_LOGIN: ${{ secrets.PARTYKIT_LOGIN }}
-          PARTYKIT_TOKEN: ${{ secrets.PARTYKIT_TOKEN }}
+          # Encrypted GitHub Actions secrets (Settings -> Secrets and
+          # variables -> Actions). Create an API token with the "Edit
+          # Cloudflare Workers" template; the account id is on your
+          # Cloudflare dashboard (Workers & Pages -> right sidebar).
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

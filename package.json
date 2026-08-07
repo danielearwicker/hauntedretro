@@ -2,13 +2,18 @@
   "name": "hauntedretro",
   "version": "0.0.1",
   "private": true,
-  "description": "Realtime multiplayer explorable map — a gamified sprint retro, built on PartyKit",
+  "description": "Realtime multiplayer explorable map — a gamified sprint retro, on Cloudflare Workers + Durable Objects (partyserver)",
   "scripts": {
-    "dev": "partykit dev",
-    "deploy": "partykit deploy"
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "partyserver": "latest"
   },
   "devDependencies": {
-    "partykit": "latest",
-    "typescript": "^5.4.0"
+    "@cloudflare/workers-types": "latest",
+    "typescript": "^5.4.0",
+    "wrangler": "latest"
   }
 }

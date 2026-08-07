@@ -1,21 +1,17 @@
-import type * as Party from "partykit/server";
+import { routePartykitRequest, Server, type Connection } from "partyserver";
 
 /**
- * Authoritative game state for one retro room (one Cloudflare Durable Object).
+ * Cloudflare Worker + Durable Object version of the retro game.
  *
- * THE MAP is defined here as the single source of truth. It's a floor plan of
- * rooms + corridors, each with doorway gaps. We generate the solid wall
- * rectangles from that layout once at module load, and send them to clients on
- * `init`. The server uses the floor rects to spawn items only on walkable
- * ground; the client uses the walls to render the building and to collide the
- * local player. Because both sides read the same generated geometry, they
- * can't drift.
+ * `Main` is a Durable Object (via partyserver's Server base class): one
+ * instance per room, holding the authoritative game state. The Worker's fetch
+ * handler routes `/parties/main/<room>` WebSocket upgrades to it; everything
+ * else is served from ./public as static assets. Deploys to your own
+ * Cloudflare account — no shared partykit.dev zone involved.
  *
- * Retro "collection" phase items:
- *   quills     - the writing TOOL. Carried, max one per player. Supply == players.
- *   parchments - the writing SURFACE. Scattered (3 x players) as a COUNT per
- *                player; a player with fewer can take one from a player with
- *                more, so hoards self-level.
+ * THE MAP is the single source of truth here: a floor plan of rooms +
+ * corridors with doorway gaps, from which we generate solid wall rectangles.
+ * Clients receive it on `init` and use it to render + collide locally.
  */
 
 type Player = {
@@ -35,7 +31,7 @@ type Door = { side: "top" | "bottom" | "left" | "right"; from: number; to: numbe
 type Area = Rect & { name?: string; doors: Door[] };
 
 const WORLD = { w: 3000, h: 2500 };
-const WALL_T = 16; // wall thickness
+const WALL_T = 16;
 
 const PLAYER_COLORS = [
   "#ff6b6b", "#feca57", "#1dd1a1", "#54a0ff",
@@ -44,13 +40,7 @@ const PLAYER_COLORS = [
 
 const GRAB_RANGE = 64;
 
-// ---- Floor plan ----------------------------------------------------------
-// Central Lobby hub, four rooms around it, joined by four corridors. Doorway
-// gaps are absolute coordinates along the relevant edge, and are chosen to line
-// up exactly with the corridor that connects there.
-// Sized so ~20 players plus their discoverable items (20 quills + 60
-// parchments) fit comfortably on walkable floor. A central Lobby hub, four
-// large rooms around it, joined by four wide corridors.
+// Sized so ~20 players plus 20 quills + 60 parchments fit on walkable floor.
 const LAYOUT: Area[] = [
   { name: "Lobby", x: 1280, y: 1000, w: 640, h: 640, doors: [
     { side: "top", from: 1504, to: 1696 }, { side: "bottom", from: 1504, to: 1696 },
@@ -60,17 +50,13 @@ const LAYOUT: Area[] = [
   { name: "Garden", x: 1200, y: 2000, w: 800, h: 360, doors: [{ side: "top", from: 1504, to: 1696 }] },
   { name: "Library", x: 400, y: 1040, w: 480, h: 560, doors: [{ side: "right", from: 1224, to: 1416 }] },
   { name: "Workshop", x: 2320, y: 1000, w: 560, h: 600, doors: [{ side: "left", from: 1224, to: 1416 }] },
-  // corridors: open at both connecting ends
   { x: 1504, y: 600, w: 192, h: 400, doors: [{ side: "top", from: 1504, to: 1696 }, { side: "bottom", from: 1504, to: 1696 }] },
   { x: 1504, y: 1640, w: 192, h: 360, doors: [{ side: "top", from: 1504, to: 1696 }, { side: "bottom", from: 1504, to: 1696 }] },
   { x: 880, y: 1224, w: 400, h: 192, doors: [{ side: "left", from: 1224, to: 1416 }, { side: "right", from: 1224, to: 1416 }] },
   { x: 1920, y: 1224, w: 400, h: 192, doors: [{ side: "left", from: 1224, to: 1416 }, { side: "right", from: 1224, to: 1416 }] },
 ];
 
-// Areas sent to the client for drawing floors/labels (geometry only, no doors).
 const AREAS = LAYOUT.map(({ name, x, y, w, h }) => ({ name, x, y, w, h }));
-
-// Generate solid wall rectangles from the layout.
 const WALLS: Rect[] = buildWalls(LAYOUT, WALL_T);
 
 function buildWalls(layout: Area[], t: number): Rect[] {
@@ -78,7 +64,6 @@ function buildWalls(layout: Area[], t: number): Rect[] {
   const opens = (doors: Door[], side: Door["side"]) =>
     doors.filter((d) => d.side === side).map((d) => [d.from, d.to] as [number, number]).sort((a, b) => a[0] - b[0]);
 
-  // horizontal wall band at y=yy, thickness t, from x0..x1, minus gaps (abs x)
   const buildH = (x0: number, x1: number, yy: number, gaps: [number, number][]) => {
     let cx = x0;
     for (const [g0, g1] of gaps) {
@@ -102,29 +87,30 @@ function buildWalls(layout: Area[], t: number): Rect[] {
 
   for (const a of layout) {
     const x2 = a.x + a.w, y2 = a.y + a.h;
-    buildH(a.x - t, x2 + t, a.y - t, opens(a.doors, "top"));    // top (corners covered by extension)
-    buildH(a.x - t, x2 + t, y2, opens(a.doors, "bottom"));       // bottom
-    buildV(a.y, y2, a.x - t, opens(a.doors, "left"));            // left
-    buildV(a.y, y2, x2, opens(a.doors, "right"));                // right
+    buildH(a.x - t, x2 + t, a.y - t, opens(a.doors, "top"));
+    buildH(a.x - t, x2 + t, y2, opens(a.doors, "bottom"));
+    buildV(a.y, y2, a.x - t, opens(a.doors, "left"));
+    buildV(a.y, y2, x2, opens(a.doors, "right"));
   }
   return out;
 }
 
-export default class GameServer implements Party.Server {
+interface Env {
+  Main: DurableObjectNamespace;
+}
+
+export class Main extends Server<Env> {
   players: Record<string, Player> = {};
   quills: Quill[] = [];
   parchments: Parchment[] = [];
   nextId = 1;
 
-  constructor(readonly room: Party.Room) {}
-
-  onConnect(conn: Party.Connection) {
+  onConnect(conn: Connection) {
     const color = PLAYER_COLORS[Object.keys(this.players).length % PLAYER_COLORS.length];
     this.players[conn.id] = {
       id: conn.id,
       name: "Guest",
       color,
-      // spawn inside the Lobby (centre ~1600,1320)
       x: 1600 + (Math.random() * 200 - 100),
       y: 1320 + (Math.random() * 200 - 100),
       carrying: null,
@@ -135,20 +121,21 @@ export default class GameServer implements Party.Server {
     this.quills.push({ id: this.mkId("quill"), ...this.spawnPos(), heldBy: null });
     for (let i = 0; i < 3; i++) this.parchments.push({ id: this.mkId("parch"), ...this.spawnPos() });
 
-    // The map (static geometry) is sent only on init; snapshots don't resend it.
+    // Map (static geometry) sent only on init; snapshots don't resend it.
     conn.send(JSON.stringify({
       type: "init",
       you: conn.id,
       map: { world: WORLD, walls: WALLS, areas: AREAS },
       ...this.snapshot(),
     }));
-    this.broadcastExcept(conn.id, { type: "snapshot", ...this.snapshot() });
+    this.broadcast(JSON.stringify({ type: "snapshot", ...this.snapshot() }), [conn.id]);
   }
 
-  onMessage(raw: string, sender: Party.Connection) {
+  // NOTE: partyserver order is (connection, message) — reversed from PartyKit.
+  onMessage(sender: Connection, raw: string | ArrayBuffer) {
     let msg: any;
     try {
-      msg = JSON.parse(raw as string);
+      msg = JSON.parse(typeof raw === "string" ? raw : new TextDecoder().decode(raw));
     } catch {
       return;
     }
@@ -158,20 +145,21 @@ export default class GameServer implements Party.Server {
     switch (msg.type) {
       case "setName": {
         player.name = String(msg.name ?? "Guest").slice(0, 24) || "Guest";
-        this.broadcastSnapshot();
+        this.pushSnapshot();
         break;
       }
 
       case "move": {
-        // The client has already resolved wall collisions locally; we just
-        // keep it inside the world and relay. (Trusted internal tool.)
         player.x = clamp(msg.x, 0, WORLD.w);
         player.y = clamp(msg.y, 0, WORLD.h);
         if (player.carrying) {
           const q = this.quills.find((q) => q.id === player.carrying);
           if (q) { q.x = player.x; q.y = player.y - 24; }
         }
-        this.broadcastExcept(sender.id, { type: "playerMoved", id: player.id, x: player.x, y: player.y });
+        this.broadcast(
+          JSON.stringify({ type: "playerMoved", id: player.id, x: player.x, y: player.y }),
+          [sender.id]
+        );
         break;
       }
 
@@ -203,7 +191,7 @@ export default class GameServer implements Party.Server {
         if (kind === "quill") { best.heldBy = player.id; player.carrying = best.id; }
         else if (kind === "parch") { this.parchments = this.parchments.filter((p) => p !== best); player.parchments++; }
         else if (kind === "steal") { best.parchments--; player.parchments++; }
-        if (kind) this.broadcastSnapshot();
+        if (kind) this.pushSnapshot();
         break;
       }
 
@@ -212,13 +200,13 @@ export default class GameServer implements Party.Server {
         const q = this.quills.find((q) => q.id === player.carrying);
         if (q) { q.heldBy = null; q.x = player.x; q.y = player.y; }
         player.carrying = null;
-        this.broadcastSnapshot();
+        this.pushSnapshot();
         break;
       }
     }
   }
 
-  onClose(conn: Party.Connection) {
+  onClose(conn: Connection) {
     const player = this.players[conn.id];
     if (player) {
       for (let i = 0; i < player.parchments; i++) {
@@ -236,7 +224,7 @@ export default class GameServer implements Party.Server {
       }
     }
     delete this.players[conn.id];
-    this.broadcastSnapshot();
+    this.pushSnapshot();
   }
 
   // ---- helpers ------------------------------------------------------------
@@ -244,7 +232,6 @@ export default class GameServer implements Party.Server {
     return prefix + this.nextId++;
   }
 
-  // Random point on walkable floor: pick an area, then a margin-inset point.
   spawnPos() {
     const a = LAYOUT[Math.floor(Math.random() * LAYOUT.length)];
     const m = 28;
@@ -258,18 +245,21 @@ export default class GameServer implements Party.Server {
     return { world: WORLD, players: this.players, quills: this.quills, parchments: this.parchments };
   }
 
-  broadcastSnapshot() {
-    this.broadcast({ type: "snapshot", ...this.snapshot() });
-  }
-
-  broadcast(obj: unknown) {
-    this.room.broadcast(JSON.stringify(obj));
-  }
-
-  broadcastExcept(id: string, obj: unknown) {
-    this.room.broadcast(JSON.stringify(obj), [id]);
+  pushSnapshot() {
+    this.broadcast(JSON.stringify({ type: "snapshot", ...this.snapshot() }));
   }
 }
+
+// Worker entry: route /parties/main/<room> to the Main Durable Object;
+// anything else falls through to static assets in ./public.
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    return (
+      (await routePartykitRequest(request, env as any)) ||
+      new Response("Not Found", { status: 404 })
+    );
+  },
+};
 
 function clamp(n: number, lo: number, hi: number) {
   n = Number(n) || 0;

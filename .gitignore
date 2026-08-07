@@ -1,8 +1,9 @@
 # dependencies
 node_modules/
 
-# partykit local dev / build state
+# partykit / wrangler local dev + build state
 .partykit/
+.wrangler/
 
 # build output
 dist/

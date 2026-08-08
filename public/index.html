@@ -283,6 +283,8 @@
 
       // ---- Movement + send throttle ------------------------------------
       const SPEED = 3.6;
+      const PARCH_SLOWDOWN = 0.02;   // -2% speed per parchment carried
+      const MIN_SPEED_FACTOR = 0.6;  // never slower than 60% of base speed
       let lastSent = 0;
       function step() {
         const p = me();
@@ -294,8 +296,11 @@
           if (keys["d"] || keys["arrowright"]) dx += 1;
           if (dx || dy) {
             const len = Math.hypot(dx, dy) || 1;
-            p.x = Math.max(0, Math.min(world.w, p.x + (dx / len) * SPEED));
-            p.y = Math.max(0, Math.min(world.h, p.y + (dy / len) * SPEED));
+            // The more parchments you carry, the slightly slower you move —
+            // so someone with fewer can always catch up and grab one.
+            const speed = SPEED * Math.max(MIN_SPEED_FACTOR, 1 - PARCH_SLOWDOWN * (p.parchments || 0));
+            p.x = Math.max(0, Math.min(world.w, p.x + (dx / len) * speed));
+            p.y = Math.max(0, Math.min(world.h, p.y + (dy / len) * speed));
             collideWalls(p); // push back out of any wall we walked into
             if (p.carrying && quills[p.carrying]) {
               quills[p.carrying].x = p.x;

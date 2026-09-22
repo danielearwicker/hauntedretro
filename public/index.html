@@ -50,6 +50,32 @@
       }
       #status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ff6b6b; margin-right: 6px; vertical-align: middle; }
       #status.online .dot { background: #1dd1a1; }
+
+      #writer {
+        position: fixed; inset: 0; z-index: 20;
+        display: none; align-items: center; justify-content: center;
+        background: rgba(0, 0, 0, 0.55);
+      }
+      #writer.open { display: flex; }
+      #writer .sheet {
+        width: min(420px, calc(100vw - 32px));
+        background: #e8dcb8; color: #2b2418;
+        border: 2px solid #a8956a; border-radius: 10px;
+        padding: 16px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+      }
+      #writer h2 { font-size: 15px; margin: 0 0 4px; }
+      #writer .sub { font-size: 12px; color: #5a4d33; margin-bottom: 10px; line-height: 1.5; }
+      #writer textarea {
+        width: 100%; height: 110px; resize: none;
+        background: #f4ecd4; color: #2b2418;
+        border: 1px solid #a8956a; border-radius: 6px;
+        padding: 8px; font: 15px/1.4 Georgia, "Times New Roman", serif;
+      }
+      #writer .foot { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; font-size: 12px; color: #5a4d33; }
+      #writer button {
+        background: #3a2f1e; color: #f4ecd4; border: 0; border-radius: 6px;
+        padding: 6px 14px; font-size: 13px; cursor: pointer;
+      }
     </style>
   </head>
   <body>
@@ -70,7 +96,27 @@
         <kbd>E</kbd> grab — a <b>quill</b> ✒️, a <b>parchment</b> 📜, or take one
         parchment from a player who has more than you<br />
         <kbd>Q</kbd> drop your quill<br />
+        <kbd>R</kbd> write a note — at a desk in the <b>Scriptorium</b>, with a
+        quill and a blank parchment<br />
+        <kbd>F</kbd> pin your note in the room whose question it answers<br />
         The number by each avatar is how many parchments they hold.
+      </div>
+    </div>
+
+    <div id="writer">
+      <div class="sheet">
+        <h2>✒️ Write a note</h2>
+        <div class="sub">
+          Carry it to the room whose question it answers:<br />
+          <b>Workshop</b> — things that need fixing ·
+          <b>Garden</b> — what have you grown? ·
+          <b>Library</b> — what have you learned?
+        </div>
+        <textarea id="noteText" maxlength="140" placeholder="Dip your quill…"></textarea>
+        <div class="foot">
+          <span><span id="noteLen">0</span>/140 · <kbd>Enter</kbd> to write, <kbd>Esc</kbd> to cancel</span>
+          <button id="noteOk">Write</button>
+        </div>
       </div>
     </div>
 
@@ -85,6 +131,8 @@
       const WS_URL = `${proto}://${location.host}/parties/main/${ROOM}`;
 
       const GRAB_RANGE = 64; // must match the server
+      const DESK_RANGE = 40;           // must match the server
+      const NOTE_W = 170, NOTE_H = 120; // must match the server
 
       // ---- Local game state (mirror of the server) ---------------------
       let myId = null;
@@ -92,21 +140,71 @@
       let players = {};    // id -> player { x, y, rx, ry, carrying, parchments, ... }
       let quills = {};     // id -> quill { x, y, heldBy }
       let parchments = []; // scattered on the ground: [{ id, x, y }]
+      let notes = [];      // pinned retro notes: [{ id, text, room, x, y, scale }]
 
       // ---- Map (received from the server on init) ----------------------
       let walls = [];      // solid rectangles: [{ x, y, w, h }]
-      let areas = [];      // floors: [{ name?, x, y, w, h }]
+      let areas = [];      // floors: [{ name?, prompt?, x, y, w, h }]
+      let desks = [];      // Scriptorium writing desks: [{ x, y, w, h }]
+      let decor = [];      // cosmetic props: [{ kind, x, y, rot? }]
       const PLAYER_R = 14; // avatar radius, used for wall collision
 
-      // Floor tint + label colour per named room; corridors use the default.
+      // Floor tint, tiled floor texture and label colour per named room;
+      // corridors use the defaults. Textures live in decor/floor-*.svg.
       const ROOM_STYLE = {
-        Lobby:       { fill: "#2a2320", label: "#c9a27a" },
-        Garden:      { fill: "#17301f", label: "#5fd08a" },
-        Scriptorium: { fill: "#241a30", label: "#b18cff" },
-        Library:     { fill: "#20262e", label: "#8fb7d8" },
-        Workshop:    { fill: "#2e241a", label: "#d8a86a" },
+        Lobby:       { fill: "#2a2320", floor: "floor-checker",   label: "#c9a27a" },
+        Garden:      { fill: "#17301f", floor: "floor-grass",     label: "#5fd08a" },
+        Scriptorium: { fill: "#241a30", floor: "floor-flagstone", label: "#b18cff" },
+        Library:     { fill: "#20262e", floor: "floor-boards",    label: "#8fb7d8" },
+        Workshop:    { fill: "#2e241a", floor: "floor-planks",    label: "#d8a86a" },
       };
       const CORRIDOR_FILL = "#1a1f27";
+      const CORRIDOR_FLOOR = "floor-corridor";
+
+      // Light sources: offsets from a prop's centre (before rotation), radius, colour.
+      const GLOWS = {
+        desk:       [{ dx: 30, dy: -12, r: 70, c: "255,190,110" }],
+        candelabra: [{ dx: 0, dy: 0, r: 130, c: "255,190,110" }],
+        lantern:    [{ dx: 0, dy: 0, r: 100, c: "255,200,120" }],
+        lamp:       [{ dx: 0, dy: 0, r: 140, c: "255,210,140" }],
+      };
+
+      // ---- Sprites (SVG, rasterised once at 2x for crisp drawing) -------
+      const SPRITE_RES = 2;
+      const sprites = {}; // kind -> { canvas, w, h } once loaded
+      const patterns = {}; // floor kind -> CanvasPattern once loaded
+      function loadSprite(kind) {
+        if (kind in sprites) return;
+        sprites[kind] = null;
+        const img = new Image();
+        img.onload = () => {
+          const w = img.naturalWidth, h = img.naturalHeight;
+          const c = document.createElement("canvas");
+          c.width = w * SPRITE_RES; c.height = h * SPRITE_RES;
+          c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+          sprites[kind] = { canvas: c, w, h };
+          if (kind.startsWith("floor-")) {
+            const pat = ctx.createPattern(c, "repeat");
+            pat.setTransform(new DOMMatrix().scale(1 / SPRITE_RES));
+            patterns[kind] = pat;
+          }
+        };
+        img.src = `decor/${kind}.svg`;
+      }
+      for (const st of Object.values(ROOM_STYLE)) loadSprite(st.floor);
+      loadSprite(CORRIDOR_FLOOR);
+      loadSprite("desk");
+      loadSprite("ghost");
+
+      function drawSprite(kind, x, y, rot) {
+        const sp = sprites[kind];
+        if (!sp) return;
+        ctx.save();
+        ctx.translate(x, y);
+        if (rot) ctx.rotate((rot * Math.PI) / 180);
+        ctx.drawImage(sp.canvas, -sp.w / 2, -sp.h / 2, sp.w, sp.h);
+        ctx.restore();
+      }
 
       // ---- Canvas / camera ---------------------------------------------
       const canvas = document.getElementById("game");
@@ -128,10 +226,12 @@
       const keys = {};
       const nameInput = document.getElementById("name");
       addEventListener("keydown", (e) => {
-        if (document.activeElement === nameInput) return;
+        if (document.activeElement === nameInput || writerOpen()) return;
         keys[e.key.toLowerCase()] = true;
         if (e.key.toLowerCase() === "e") send({ type: "grab" });     // server decides what
         if (e.key.toLowerCase() === "q") tryDrop();
+        if (e.key.toLowerCase() === "r" && canWrite()) { e.preventDefault(); openWriter(); }
+        if (e.key.toLowerCase() === "f" && canPin()) send({ type: "pin" });
         if (["arrowup", "arrowdown", "arrowleft", "arrowright"].includes(e.key.toLowerCase())) e.preventDefault();
       });
       addEventListener("keyup", (e) => { keys[e.key.toLowerCase()] = false; });
@@ -139,6 +239,33 @@
       nameInput.addEventListener("change", () => {
         send({ type: "setName", name: nameInput.value.trim() || "Guest" });
       });
+
+      // ---- Writing overlay ---------------------------------------------
+      const writer = document.getElementById("writer");
+      const noteText = document.getElementById("noteText");
+      function writerOpen() { return writer.classList.contains("open"); }
+      function openWriter() {
+        for (const k in keys) keys[k] = false; // stop walking while writing
+        noteText.value = "";
+        document.getElementById("noteLen").textContent = "0";
+        writer.classList.add("open");
+        noteText.focus();
+      }
+      function closeWriter() { writer.classList.remove("open"); noteText.blur(); }
+      function submitNote() {
+        const text = noteText.value.trim();
+        if (text) send({ type: "write", text });
+        closeWriter();
+      }
+      noteText.addEventListener("input", () => {
+        document.getElementById("noteLen").textContent = noteText.value.length;
+      });
+      noteText.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitNote(); }
+        if (e.key === "Escape") closeWriter();
+      });
+      document.getElementById("noteOk").addEventListener("click", submitNote);
+      writer.addEventListener("click", (e) => { if (e.target === writer) closeWriter(); });
 
       // ---- WebSocket wiring --------------------------------------------
       let socket;
@@ -159,7 +286,11 @@
         switch (msg.type) {
           case "init":
             myId = msg.you;
-            if (msg.map) { walls = msg.map.walls || []; areas = msg.map.areas || []; }
+            if (msg.map) {
+              walls = msg.map.walls || []; areas = msg.map.areas || [];
+              desks = msg.map.desks || []; decor = msg.map.decor || [];
+              for (const d of decor) loadSprite(d.kind);
+            }
             applySnapshot(msg);
             if (nameInput.value.trim()) send({ type: "setName", name: nameInput.value.trim() });
             break;
@@ -181,6 +312,7 @@
         world = s.world;
         quills = Object.fromEntries(s.quills.map((q) => [q.id, q]));
         parchments = s.parchments;
+        notes = s.notes || [];
 
         const merged = {};
         for (const id in s.players) {
@@ -190,6 +322,7 @@
             // keep my authoritative local position + camera feel; take counts from server
             old.parchments = np.parchments;
             old.carrying = np.carrying;
+            old.note = np.note;
             old.name = np.name;
             old.color = np.color;
             merged[id] = old;
@@ -217,6 +350,30 @@
       function tryDrop() {
         const p = me();
         if (p && p.carrying) send({ type: "drop" });
+      }
+
+      // Client mirrors of the server's write/pin rules, for keys + hints.
+      function namedAreaAt(p) {
+        return areas.find((a) => a.name && p.x >= a.x && p.x <= a.x + a.w && p.y >= a.y && p.y <= a.y + a.h);
+      }
+      function nearDesk(p) {
+        return desks.some((d) => {
+          const nx = Math.max(d.x, Math.min(p.x, d.x + d.w));
+          const ny = Math.max(d.y, Math.min(p.y, d.y + d.h));
+          return Math.hypot(p.x - nx, p.y - ny) <= DESK_RANGE;
+        });
+      }
+      function atDesk() {
+        const p = me();
+        return !!p && namedAreaAt(p)?.name === "Scriptorium" && nearDesk(p);
+      }
+      function canWrite() {
+        const p = me();
+        return atDesk() && !p.note && !!p.carrying && p.parchments > 0;
+      }
+      function canPin() {
+        const p = me();
+        return !!p && !!p.note && !!namedAreaAt(p)?.prompt;
       }
 
       // Mirror of the server's grab logic, used ONLY to draw the E hint.
@@ -347,11 +504,18 @@
         drawGrid();
         drawAreas();
         drawWalls();
+        drawDecor();
+        drawGlows();
+        drawLabels();
+        drawNotes();
         drawGround();
         drawPlayers();
+        drawGhost();
+        drawRaisedNote();
         drawGrabHint();
 
         ctx.restore();
+        drawActionHint();
       }
 
       function drawGrid() {
@@ -378,10 +542,29 @@
           ctx.fillStyle = style ? style.fill : CORRIDOR_FILL;
           roundRect(a.x, a.y, a.w, a.h, a.name ? 10 : 4);
           ctx.fill();
+          const pat = patterns[style ? style.floor : CORRIDOR_FLOOR];
+          if (pat) { ctx.fillStyle = pat; ctx.fill(); }
+        }
+      }
+
+      // Room names + prompts, drawn over the floor and props.
+      function drawLabels() {
+        for (const a of areas) {
+          const style = a.name && ROOM_STYLE[a.name];
           if (a.name && style) {
+            ctx.save();
+            ctx.shadowColor = "rgba(0,0,0,0.9)";
+            ctx.shadowBlur = 6;
             ctx.fillStyle = style.label;
             ctx.font = "600 22px system-ui, sans-serif";
             ctx.fillText(a.name, a.x + 20, a.y + 34);
+            if (a.prompt) {
+              ctx.globalAlpha = 0.75;
+              ctx.font = "italic 15px Georgia, serif";
+              ctx.fillText(a.prompt, a.x + 20, a.y + 56);
+              ctx.globalAlpha = 1;
+            }
+            ctx.restore();
           }
         }
       }
@@ -394,6 +577,174 @@
           ctx.fillStyle = "rgba(255,255,255,0.07)";
           ctx.fillRect(w.x, w.y, w.w, Math.min(3, w.h));
         }
+      }
+
+      // Props plus the Scriptorium desks, which are the same kind of sprite.
+      function allProps() {
+        return decor.concat(desks.map((d) => ({ kind: "desk", x: d.x + d.w / 2, y: d.y + d.h / 2 })));
+      }
+
+      function drawDecor() {
+        for (const d of allProps()) drawSprite(d.kind, d.x, d.y, d.rot);
+      }
+
+      // Flickering pools of candle/lantern light, plus moonlight under windows.
+      function drawGlows() {
+        const t = performance.now() / 1000;
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        allProps().forEach((d, i) => {
+          // keep the light inside the prop's room (a window lights the room below it)
+          const room = areas.find((a) => d.x >= a.x && d.x <= a.x + a.w && d.y + 20 >= a.y && d.y <= a.y + a.h);
+          ctx.save();
+          if (room) { ctx.beginPath(); ctx.rect(room.x, room.y, room.w, room.h); ctx.clip(); }
+          drawGlow(d, i, t);
+          ctx.restore();
+        });
+        ctx.restore();
+      }
+
+      function drawGlow(d, i, t) {
+          if (d.kind === "window") {
+            const g = ctx.createLinearGradient(0, d.y, 0, d.y + 200);
+            g.addColorStop(0, "rgba(140,160,255,0.10)");
+            g.addColorStop(1, "rgba(140,160,255,0)");
+            ctx.fillStyle = g;
+            ctx.beginPath();
+            ctx.moveTo(d.x - 20, d.y + 10); ctx.lineTo(d.x + 20, d.y + 10);
+            ctx.lineTo(d.x + 50, d.y + 200); ctx.lineTo(d.x - 10, d.y + 200);
+            ctx.closePath(); ctx.fill();
+            return;
+          }
+          for (const l of GLOWS[d.kind] || []) {
+            const a = ((d.rot || 0) * Math.PI) / 180;
+            const x = d.x + l.dx * Math.cos(a) - l.dy * Math.sin(a);
+            const y = d.y + l.dx * Math.sin(a) + l.dy * Math.cos(a);
+            const flicker = 0.85 + 0.1 * Math.sin(t * 7 + i * 1.7) + 0.05 * Math.sin(t * 17 + i * 3.1);
+            const g = ctx.createRadialGradient(x, y, 0, x, y, l.r);
+            g.addColorStop(0, `rgba(${l.c},${0.16 * flicker})`);
+            g.addColorStop(1, `rgba(${l.c},0)`);
+            ctx.fillStyle = g;
+            ctx.fillRect(x - l.r, y - l.r, l.r * 2, l.r * 2);
+          }
+      }
+
+      // The resident ghost drifts around the Lobby. Its path is a function of
+      // the wall clock, so everyone sees it in roughly the same place.
+      function drawGhost() {
+        const sp = sprites.ghost;
+        if (!sp) return;
+        const t = Date.now() / 1000;
+        const x = 1600 + 230 * Math.sin(t * 0.13);
+        const y = 1320 + 160 * Math.sin(t * 0.21) + 5 * Math.sin(t * 2.2);
+        const facingLeft = Math.cos(t * 0.13) < 0;
+        ctx.save();
+        ctx.globalAlpha = 0.45 + 0.15 * Math.sin(t * 0.7);
+        ctx.fillStyle = "rgba(0,0,0,0.25)";
+        ctx.beginPath(); ctx.ellipse(x, y + 34, 14, 5, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.translate(x, y);
+        if (facingLeft) ctx.scale(-1, 1);
+        ctx.drawImage(sp.canvas, -sp.w / 2, -sp.h / 2, sp.w, sp.h);
+        ctx.restore();
+      }
+
+      // Word-wrap text to fit maxW, returning at most maxLines lines.
+      function wrapLines(text, maxW, maxLines) {
+        const lines = [];
+        let line = "";
+        for (const word of text.split(/\s+/)) {
+          const tryLine = line ? line + " " + word : word;
+          if (ctx.measureText(tryLine).width <= maxW || !line) line = tryLine;
+          else { lines.push(line); line = word; }
+        }
+        if (line) lines.push(line);
+        if (lines.length > maxLines) {
+          lines.length = maxLines;
+          lines[maxLines - 1] = lines[maxLines - 1].replace(/\s*\S*$/, "") + "…";
+        }
+        return lines;
+      }
+
+      // One note card centred on (cx, cy), drawn at full size then scaled.
+      function drawNoteCard(text, cx, cy, s, raised) {
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.scale(s, s);
+        const x = -NOTE_W / 2, y = -NOTE_H / 2;
+        ctx.fillStyle = raised ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.35)";
+        roundRect(x + 3, y + (raised ? 8 : 4), NOTE_W, NOTE_H, 4); ctx.fill();
+        ctx.fillStyle = "#e8dcb8";
+        ctx.strokeStyle = raised ? "#f4ecd4" : "#a8956a"; ctx.lineWidth = 1.5;
+        roundRect(x, y, NOTE_W, NOTE_H, 4); ctx.fill(); ctx.stroke();
+        // pin
+        ctx.fillStyle = "#b8403a";
+        ctx.beginPath(); ctx.arc(0, y + 8, 4, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#2b2418";
+        ctx.font = "13px Georgia, serif";
+        wrapLines(text, NOTE_W - 20, 6).forEach((l, i) => ctx.fillText(l, x + 10, y + 30 + i * 16));
+        ctx.restore();
+      }
+
+      function drawNotes() {
+        for (const n of notes) drawNoteCard(n.text, n.x, n.y, n.scale ?? 1, false);
+      }
+
+      // Once a room has filled up and its cards have shrunk, the card you're
+      // standing nearest pops up full size so you can read it.
+      function noteToRead() {
+        const p = me();
+        if (!p) return null;
+        let best = null, bestD = Infinity;
+        for (const n of notes) {
+          const s = n.scale ?? 1;
+          if (s >= 1) continue;
+          const hw = (NOTE_W * s) / 2 + 20, hh = (NOTE_H * s) / 2 + 20;
+          if (Math.abs(p.x - n.x) > hw || Math.abs(p.y - n.y) > hh) continue;
+          const d = Math.hypot(p.x - n.x, p.y - n.y);
+          if (d < bestD) { bestD = d; best = n; }
+        }
+        return best;
+      }
+
+      function drawRaisedNote() {
+        const n = noteToRead();
+        if (!n) return;
+        // keep the enlarged card inside its room so it doesn't spill over walls
+        const a = areas.find((a) => a.name === n.room);
+        let x = n.x, y = n.y;
+        if (a) {
+          x = Math.max(a.x + NOTE_W / 2, Math.min(a.x + a.w - NOTE_W / 2, x));
+          y = Math.max(a.y + NOTE_H / 2, Math.min(a.y + a.h - NOTE_H / 2, y));
+        }
+        drawNoteCard(n.text, x, y, 1, true);
+      }
+
+      // Contextual help pinned to the bottom of the screen.
+      function drawActionHint() {
+        const p = me();
+        if (!p) return;
+        let text = null;
+        if (p.note) {
+          const a = namedAreaAt(p);
+          text = a?.prompt ? `F — pin your note in the ${a.name}`
+               : "Carry your note to the Workshop, Garden or Library";
+        } else if (atDesk()) {
+          text = canWrite() ? "R — write a note"
+               : !p.carrying ? "You need a quill to write"
+               : "You need a blank parchment to write";
+        }
+        if (!text) return;
+        ctx.save();
+        ctx.scale(dpr, dpr);
+        ctx.font = "600 14px system-ui, sans-serif";
+        const w = ctx.measureText(text).width + 28;
+        const x = innerWidth / 2 - w / 2, y = innerHeight - 64;
+        ctx.fillStyle = "rgba(20,24,33,0.88)";
+        roundRect(x, y, w, 32, 16); ctx.fill();
+        ctx.fillStyle = "#e6e9ef";
+        ctx.textAlign = "center";
+        ctx.fillText(text, innerWidth / 2, y + 21);
+        ctx.restore();
       }
 
       function drawWorldBounds() {
@@ -480,6 +831,12 @@
           }
           // carried quill above the head
           if (p.carrying && quills[p.carrying]) drawQuill(x, y - 26, 1);
+          // a written note, carried under the arm
+          if (p.note) {
+            drawScroll(x + 20, y - 4, 0.9);
+            ctx.fillStyle = "#b8403a";
+            ctx.beginPath(); ctx.arc(x + 20, y + 3, 2.5, 0, Math.PI * 2); ctx.fill();
+          }
           // name
           ctx.fillStyle = "#e6e9ef";
           ctx.font = "600 13px system-ui, sans-serif";

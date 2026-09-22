@@ -377,6 +377,7 @@
           } else {
             np.rx = old ? old.rx : np.x;
             np.ry = old ? old.ry : np.y;
+            if (old) { np.anim = old.anim; }
             merged[id] = np;
           }
         }
@@ -549,6 +550,7 @@
           if (Math.hypot(dx, dy) > 240) { q.rx = q.x; q.ry = q.y; }
           else { q.rx += dx * 0.25; q.ry += dy * 0.25; }
         }
+        for (const id in players) animate(players[id]);
 
         draw();
         requestAnimationFrame(step);
@@ -960,35 +962,169 @@
         }
       }
 
+      // ---- Player figures ---------------------------------------------
+      // Each player is a hooded scribe drawn in code, so the robe can take the
+      // player's colour. It faces down/up/left/right — whichever way it last
+      // moved — and its walk cycle advances with distance travelled, so a
+      // player slowed by parchments visibly plods.
+      const SKIN_TONES = ["#f1c9a5", "#e0ac7e", "#c68a5e", "#9a6440", "#6e4630"];
+      function skinFor(id) {
+        let h = 0;
+        for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) | 0;
+        return SKIN_TONES[Math.abs(h) % SKIN_TONES.length];
+      }
+
+      // Mix a #rrggbb colour toward black (f < 0) or white (f > 0).
+      function shade(hex, f) {
+        const n = parseInt(hex.slice(1), 16);
+        const mix = (c) => Math.round(f < 0 ? c * (1 + f) : c + (255 - c) * f);
+        return `rgb(${mix(n >> 16)},${mix((n >> 8) & 255)},${mix(n & 255)})`;
+      }
+
+      function animate(p) {
+        const x = p.rx ?? p.x, y = p.ry ?? p.y;
+        const a = (p.anim ??= { px: x, py: y, dir: "down", phase: 0, speed: 0 });
+        const dx = x - a.px, dy = y - a.py;
+        a.px = x; a.py = y;
+        const d = Math.hypot(dx, dy);
+        if (d > 60) return; // a jump (reconnect/teleport), not a step
+        // smooth the speed so network-driven movement doesn't stutter
+        a.speed += (d - a.speed) * 0.3;
+        if (d > 0.4) {
+          // pick the dominant axis, with some stickiness on diagonals
+          const horiz = a.dir === "left" || a.dir === "right";
+          const useX = horiz ? Math.abs(dx) * 1.3 > Math.abs(dy) : Math.abs(dx) > Math.abs(dy) * 1.3;
+          a.dir = useX ? (dx < 0 ? "left" : "right") : (dy < 0 ? "up" : "down");
+        }
+        if (a.speed > 0.3) a.phase += a.speed * 0.22;
+        else a.phase = 0;
+      }
+
+      function drawFigure(p, x, y, isMe) {
+        const a = p.anim || { dir: "down", phase: 0, speed: 0 };
+        const walking = a.speed > 0.3;
+        const t = performance.now() / 1000;
+        const s = Math.sin(a.phase);
+        const bob = walking ? -Math.abs(Math.cos(a.phase)) * 2 : Math.sin(t * 2.2) * 0.6;
+        const robe = p.color, robeDark = shade(p.color, -0.35), robeLight = shade(p.color, 0.08);
+        const side = a.dir === "left" || a.dir === "right";
+        const flip = a.dir === "left" ? -1 : 1;
+
+        // shadow, plus a ring on the ground under my own figure
+        ctx.fillStyle = "rgba(0,0,0,0.35)";
+        ctx.beginPath(); ctx.ellipse(x, y + 17, 13, 5, 0, 0, Math.PI * 2); ctx.fill();
+        if (isMe) {
+          ctx.strokeStyle = "rgba(255,255,255,0.8)"; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.ellipse(x, y + 17, 17, 7, 0, 0, Math.PI * 2); ctx.stroke();
+        }
+
+        ctx.save();
+        ctx.translate(x, y);
+        if (a.dir === "left") ctx.scale(-1, 1); // left is right, mirrored
+
+        // feet, stepping out from under the robe
+        ctx.fillStyle = "#5a3f2a";
+        ctx.strokeStyle = "#2a1c12"; ctx.lineWidth = 1;
+        if (side) {
+          // stride along the direction of travel; the lifted foot rises a little
+          for (const k of [1, -1]) {
+            const lift = Math.max(0, k * Math.cos(a.phase)) * 2.5;
+            ctx.beginPath(); ctx.ellipse(k * s * 7 + 2, 16 - lift, 4.8, 2.8, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          }
+        } else {
+          // toward/away from the viewer: feet alternately peek out and tuck under
+          const fwd = a.dir === "down" ? 1 : -1;
+          for (const k of [1, -1]) {
+            ctx.beginPath(); ctx.ellipse(k * 5, 15.5 + k * s * 2.5 * fwd, 3.6, 3, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          }
+        }
+
+        ctx.translate(0, bob);
+
+        // back sleeve (side view): behind the robe, swinging against the front one
+        if (side) {
+          ctx.fillStyle = robeDark;
+          ctx.beginPath(); ctx.ellipse(-s * 5 - 1, 1, 3.6, 7, s * 0.4, 0, Math.PI * 2); ctx.fill();
+        }
+
+        // robe: flares from the shoulders to a hem that sways as they walk
+        const sway = walking ? s * 1.6 : 0;
+        ctx.fillStyle = robe;
+        ctx.beginPath();
+        ctx.moveTo(-8, -6); ctx.lineTo(8, -6);
+        ctx.lineTo(11 + sway, 12); ctx.quadraticCurveTo(0, 14.5, -11 + sway, 12);
+        ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = robeDark; ctx.lineWidth = 1.2; ctx.stroke();
+        // a fold down the middle and a rope belt
+        ctx.strokeStyle = robeDark; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(side ? 2 : 0, 3); ctx.lineTo((side ? 2 : 0) + sway, 12); ctx.stroke();
+        ctx.strokeStyle = "#d9c89a"; ctx.lineWidth = 1.6;
+        ctx.beginPath(); ctx.moveTo(-9, 2); ctx.quadraticCurveTo(0, 4, 9, 2); ctx.stroke();
+
+        // sleeves (front/back view: one each side, swinging opposite the feet)
+        ctx.fillStyle = robeLight;
+        if (side) {
+          ctx.beginPath(); ctx.ellipse(s * 5 + 1, 1, 3.8, 7, -s * 0.4, 0, Math.PI * 2); ctx.fill();
+        } else {
+          for (const k of [1, -1]) {
+            ctx.beginPath(); ctx.ellipse(k * 10, 0 - k * s * 1.5, 3.6, 6.5, k * 0.15, 0, Math.PI * 2); ctx.fill();
+          }
+        }
+
+        // head in a hood; the face shows unless they're walking away
+        const skin = skinFor(p.id || "");
+        ctx.fillStyle = robe;
+        ctx.beginPath(); ctx.arc(0, -14, 10, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = robeDark; ctx.lineWidth = 1.2; ctx.stroke();
+        if (a.dir === "down") {
+          ctx.fillStyle = robeDark;
+          ctx.beginPath(); ctx.ellipse(0, -12.5, 7.2, 7.4, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = skin;
+          ctx.beginPath(); ctx.ellipse(0, -11.5, 6.2, 6.4, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#1a1512";
+          ctx.beginPath(); ctx.arc(-2.4, -12, 1.2, 0, Math.PI * 2); ctx.arc(2.4, -12, 1.2, 0, Math.PI * 2); ctx.fill();
+        } else if (side) {
+          ctx.fillStyle = robeDark;
+          ctx.beginPath(); ctx.ellipse(4, -12.5, 5.6, 7, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = skin;
+          ctx.beginPath(); ctx.ellipse(5, -11.8, 4.6, 6, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#1a1512";
+          ctx.beginPath(); ctx.arc(6.5, -12.5, 1.2, 0, Math.PI * 2); ctx.fill();
+        } else {
+          // from behind: the hood's point and seam
+          ctx.strokeStyle = robeDark; ctx.lineWidth = 1.2;
+          ctx.beginPath(); ctx.moveTo(0, -23); ctx.quadraticCurveTo(1, -14, 0, -6); ctx.stroke();
+        }
+        ctx.restore();
+
+        // carried things, drawn unmirrored so they sit on a consistent side
+        const hand = side ? flip * (s * 5 + 3) : 11;
+        if (p.carrying && quills[p.carrying]) {
+          const handY = side ? y + bob + 5 : y + bob + 4 - s * 1.5;
+          drawQuill(x + hand + 1, handY, 0.75);
+        }
+        if (p.note) {
+          const nx = x - (side ? flip * 6 : 12), ny = y + bob - 1;
+          drawScroll(nx, ny, 0.8);
+          ctx.fillStyle = "#b8403a";
+          ctx.beginPath(); ctx.arc(nx, ny + 5, 2.2, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+
       function drawPlayers() {
-        for (const id in players) {
+        // lower figures are nearer the viewer, so draw them last
+        const order = Object.keys(players).sort((a, b) => (players[a].ry ?? players[a].y) - (players[b].ry ?? players[b].y));
+        for (const id of order) {
           const p = players[id];
           const x = p.rx ?? p.x, y = p.ry ?? p.y;
-          // shadow
-          ctx.fillStyle = "rgba(0,0,0,0.35)";
-          ctx.beginPath(); ctx.ellipse(x, y + 16, 14, 6, 0, 0, Math.PI * 2); ctx.fill();
-          // body
-          ctx.fillStyle = p.color;
-          ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI * 2); ctx.fill();
-          if (id === myId) {
-            ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.5;
-            ctx.beginPath(); ctx.arc(x, y, 17, 0, Math.PI * 2); ctx.stroke();
-          }
-          // carried quill above the head
-          if (p.carrying && quills[p.carrying]) drawQuill(x, y - 26, 1);
-          // a written note, carried under the arm
-          if (p.note) {
-            drawScroll(x + 20, y - 4, 0.9);
-            ctx.fillStyle = "#b8403a";
-            ctx.beginPath(); ctx.arc(x + 20, y + 3, 2.5, 0, Math.PI * 2); ctx.fill();
-          }
+          drawFigure(p, x, y, id === myId);
           // name
           ctx.fillStyle = "#e6e9ef";
           ctx.font = "600 13px system-ui, sans-serif";
           ctx.textAlign = "center";
-          ctx.fillText(p.name || "Guest", x, y - 34);
-          // parchment count badge just below the avatar
-          drawParchmentBadge(x, y + 30, p.parchments || 0);
+          ctx.fillText(p.name || "Guest", x, y - 32);
+          // parchment count badge just below the figure
+          drawParchmentBadge(x, y + 36, p.parchments || 0);
           ctx.textAlign = "left";
         }
       }

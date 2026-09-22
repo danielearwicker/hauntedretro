@@ -16,7 +16,8 @@ import { routePartykitRequest, Server, type Connection } from "partyserver";
  * THE RETRO: the three column rooms (Workshop, Garden, Library) each carry a
  * retro prompt. Players write notes at the writing desks in the Scriptorium
  * (needs a quill + a blank parchment), carry them out, and pin them in the
- * room whose prompt they answer.
+ * room whose prompt they answer. Then everyone votes by pressing wax seals
+ * onto notes: VOTES_PER_PLAYER each, at most one per note.
  *
  * PERSISTENCE: the board (pinned notes) is saved to Durable Object storage on
  * every change and reloaded in onStart, so a retro survives the room going
@@ -33,12 +34,13 @@ type Player = {
   carrying: string | null;
   parchments: number;
   note: { id: string; text: string } | null; // a written note being carried
+  voter: string | null; // stable per-tab id from the client, so a refresh keeps your ballot
 };
 
 type Quill = { id: string; x: number; y: number; heldBy: string | null };
 type Parchment = { id: string; x: number; y: number };
 // x, y is the card's centre; scale shrinks cards when a room fills up.
-type Note = { id: string; text: string; room: string; slot: number; x: number; y: number; scale: number };
+type Note = { id: string; text: string; room: string; slot: number; x: number; y: number; scale: number; votes: number };
 type Rect = { x: number; y: number; w: number; h: number };
 type Door = { side: "top" | "bottom" | "left" | "right"; from: number; to: number };
 type Area = Rect & { name?: string; prompt?: string; doors: Door[] };
@@ -59,6 +61,8 @@ const NOTE_GAP = 12;
 const NOTE_TOP = 64;       // leave room for the room's name + prompt
 const NOTE_MARGIN = 12;
 const NOTE_SHRINK = 0.85;  // scale step when a room runs out of slots
+const NOTE_REACH = 20;     // how far outside a card you can be and still vote on it
+const VOTES_PER_PLAYER = 3;
 
 // Card slots in a column room at a given scale, as centre points in row-major order.
 function noteSlots(a: Rect, scale: number) {
@@ -195,7 +199,9 @@ function buildWalls(layout: Area[], t: number): Rect[] {
 }
 
 // What's saved in Durable Object storage under the "board" key.
-type Board = { notes: Note[]; roomScale: Record<string, number>; nextId: number };
+// ballots maps voter id -> ids of the notes they've sealed. Only totals are
+// broadcast; each voter is sent their own ballot privately.
+type Board = { notes: Note[]; roomScale: Record<string, number>; nextId: number; ballots: Record<string, string[]> };
 
 interface Env {
   Main: DurableObjectNamespace;
@@ -207,6 +213,7 @@ export class Main extends Server<Env> {
   parchments: Parchment[] = [];
   notes: Note[] = []; // pinned retro notes; they outlive the players who wrote them
   roomScale: Record<string, number> = {}; // current note scale per column room
+  ballots: Record<string, string[]> = {};
   nextId = 1;
 
   async onStart() {
@@ -215,6 +222,8 @@ export class Main extends Server<Env> {
     this.notes = board.notes;
     this.roomScale = board.roomScale;
     this.nextId = board.nextId;
+    this.ballots = board.ballots ?? {};
+    for (const n of this.notes) n.votes ??= 0;
     // Re-fit every room to the current layout, in case rooms or the note
     // grid changed since the board was saved.
     for (const a of LAYOUT) if (a.prompt) this.fitRoom(a, 0);
@@ -223,7 +232,7 @@ export class Main extends Server<Env> {
   saveBoard() {
     // Not awaited: Durable Object output gates hold outgoing messages until
     // the write is durable, so nobody sees a pin that could be lost.
-    const board: Board = { notes: this.notes, roomScale: this.roomScale, nextId: this.nextId };
+    const board: Board = { notes: this.notes, roomScale: this.roomScale, nextId: this.nextId, ballots: this.ballots };
     this.ctx.storage.put("board", board);
   }
 
@@ -238,6 +247,7 @@ export class Main extends Server<Env> {
       carrying: null,
       parchments: 0,
       note: null,
+      voter: null,
     };
 
     // Supply scales with the group.
@@ -266,6 +276,27 @@ export class Main extends Server<Env> {
     if (!player) return;
 
     switch (msg.type) {
+      case "hello": {
+        player.voter = String(msg.voter ?? "").slice(0, 64) || null;
+        this.sendBallot(sender, player);
+        break;
+      }
+
+      case "vote": {
+        // Toggle your seal on the note you're standing at.
+        const note = player.voter && this.noteAt(player);
+        if (!note) break;
+        const mine = (this.ballots[player.voter!] ??= []);
+        const i = mine.indexOf(note.id);
+        if (i >= 0) { mine.splice(i, 1); note.votes--; }
+        else if (mine.length < VOTES_PER_PLAYER) { mine.push(note.id); note.votes++; }
+        else break;
+        this.saveBoard();
+        this.sendBallot(sender, player);
+        this.pushSnapshot();
+        break;
+      }
+
       case "setName": {
         player.name = String(msg.name ?? "Guest").slice(0, 24) || "Guest";
         this.pushSnapshot();
@@ -379,7 +410,24 @@ export class Main extends Server<Env> {
     const slots = this.fitRoom(area, 1);
     const inRoom = this.notes.filter((n) => n.room === area.name);
     const slot = nearestFreeSlot(slots, new Set(inRoom.map((n) => n.slot)), at);
-    this.notes.push({ ...note, room: area.name!, slot, ...slots[slot], scale: this.roomScale[area.name!] });
+    this.notes.push({ ...note, room: area.name!, slot, ...slots[slot], scale: this.roomScale[area.name!], votes: 0 });
+  }
+
+  // The note card nearest to p, if p is on or just beside it.
+  noteAt(p: { x: number; y: number }) {
+    let best: Note | null = null, bestD = Infinity;
+    for (const n of this.notes) {
+      if (Math.abs(p.x - n.x) > (NOTE_W * n.scale) / 2 + NOTE_REACH) continue;
+      if (Math.abs(p.y - n.y) > (NOTE_H * n.scale) / 2 + NOTE_REACH) continue;
+      const d = dist(p, n);
+      if (d < bestD) { bestD = d; best = n; }
+    }
+    return best;
+  }
+
+  sendBallot(conn: Connection, player: Player) {
+    const notes = (player.voter && this.ballots[player.voter]) || [];
+    conn.send(JSON.stringify({ type: "ballot", notes, max: VOTES_PER_PLAYER }));
   }
 
   // Make sure a room's grid has space for its notes plus `extra` more,

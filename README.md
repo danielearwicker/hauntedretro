@@ -33,6 +33,8 @@ URL (e.g. `http://127.0.0.1:8787/#sprint-42`) to create separate rooms.
 - **R** — write a note (at a desk in the Scriptorium, holding a quill and a
   blank parchment)
 - **F** — pin the note you're carrying in the room you're standing in
+- **V** — press one of your wax seals onto the note you're standing at, or
+  take it back
 
 ## The retro
 
@@ -45,6 +47,11 @@ one it answers and pin it there:
 | Workshop | Things that need fixing |
 | Garden   | What have you grown (in tools or product)? |
 | Library  | What have you learned? |
+
+Then vote: everyone has 3 wax seals, at most one per note, and can move them
+around freely. Cards show their total; a gold ring marks your own seal. Votes
+are anonymous — only totals are broadcast — and your ballot is tied to your
+browser tab, so a refresh keeps it (a new tab is a new voter).
 
 Notes are anonymous. An unpinned note turns back into a blank parchment if
 its carrier leaves.
@@ -83,4 +90,3 @@ The game goes live at `https://hauntedretro.<your-subdomain>.workers.dev`.
 
 ## Where to take it next (toward a real retro)
 
-- **Voting** — players spend tokens on notes; the Durable Object tallies live.

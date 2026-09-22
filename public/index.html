@@ -43,6 +43,9 @@
         font-size: 12px; background: #232936; color: #9aa4b2;
       }
       .pill b { color: #e6e9ef; }
+      .seals { letter-spacing: 1px; }
+      .seals .used { color: #4a4f5c; }
+      .seals .left { color: #c8413a; }
 
       #status {
         position: fixed; bottom: 12px; left: 12px; z-index: 10;
@@ -90,6 +93,7 @@
         <span class="pill">Room: <b id="roomName">retro</b></span>
         <span class="pill"><b id="count">1</b> online</span>
         <span class="pill">You hold <b id="myParch">0</b> 📜</span>
+        <span class="pill">Seals <b id="seals" class="seals"></b></span>
       </div>
       <div class="hint">
         <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows to move<br />
@@ -99,6 +103,8 @@
         <kbd>R</kbd> write a note — at a desk in the <b>Scriptorium</b>, with a
         quill and a blank parchment<br />
         <kbd>F</kbd> pin your note in the room whose question it answers<br />
+        <kbd>V</kbd> press one of your wax seals onto the note you're standing
+        at (again to take it back)<br />
         The number by each avatar is how many parchments they hold.
       </div>
     </div>
@@ -133,6 +139,18 @@
       const GRAB_RANGE = 64; // must match the server
       const DESK_RANGE = 40;           // must match the server
       const NOTE_W = 170, NOTE_H = 120; // must match the server
+      const NOTE_REACH = 20;            // must match the server
+
+      // A per-tab voter id: survives a refresh (so you keep your ballot) but
+      // a new tab is a new voter, which keeps multi-tab testing working.
+      const VOTER = (() => {
+        const fresh = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+        try {
+          let v = sessionStorage.getItem("hauntedretro.voter");
+          if (!v) { v = fresh(); sessionStorage.setItem("hauntedretro.voter", v); }
+          return v;
+        } catch { return fresh(); }
+      })();
 
       // ---- Local game state (mirror of the server) ---------------------
       let myId = null;
@@ -140,7 +158,9 @@
       let players = {};    // id -> player { x, y, rx, ry, carrying, parchments, ... }
       let quills = {};     // id -> quill { x, y, heldBy }
       let parchments = []; // scattered on the ground: [{ id, x, y }]
-      let notes = [];      // pinned retro notes: [{ id, text, room, x, y, scale }]
+      let notes = [];      // pinned retro notes: [{ id, text, room, x, y, scale, votes }]
+      let myBallot = [];   // ids of the notes I've sealed
+      let maxSeals = 3;
 
       // ---- Map (received from the server on init) ----------------------
       let walls = [];      // solid rectangles: [{ x, y, w, h }]
@@ -232,6 +252,7 @@
         if (e.key.toLowerCase() === "q") tryDrop();
         if (e.key.toLowerCase() === "r" && canWrite()) { e.preventDefault(); openWriter(); }
         if (e.key.toLowerCase() === "f" && canPin()) send({ type: "pin" });
+        if (e.key.toLowerCase() === "v" && noteNear()) send({ type: "vote" });
         if (["arrowup", "arrowdown", "arrowleft", "arrowright"].includes(e.key.toLowerCase())) e.preventDefault();
       });
       addEventListener("keyup", (e) => { keys[e.key.toLowerCase()] = false; });
@@ -271,7 +292,10 @@
       let socket;
       function connect() {
         socket = new WebSocket(WS_URL);
-        socket.addEventListener("open", () => setStatus(true, "connected"));
+        socket.addEventListener("open", () => {
+          setStatus(true, "connected");
+          send({ type: "hello", voter: VOTER });
+        });
         socket.addEventListener("close", () => {
           setStatus(false, "reconnecting…");
           setTimeout(connect, 1000);
@@ -296,6 +320,11 @@
             break;
           case "snapshot":
             applySnapshot(msg);
+            break;
+          case "ballot":
+            myBallot = msg.notes || [];
+            maxSeals = msg.max || maxSeals;
+            renderSeals();
             break;
           case "playerMoved": {
             const p = players[msg.id];
@@ -338,6 +367,13 @@
         const me_ = players[myId];
         if (me_) document.getElementById("myParch").textContent = me_.parchments;
       }
+
+      function renderSeals() {
+        const left = Math.max(0, maxSeals - myBallot.length);
+        document.getElementById("seals").innerHTML =
+          '<span class="left">' + "●".repeat(left) + '</span><span class="used">' + "○".repeat(maxSeals - left) + "</span>";
+      }
+      renderSeals();
 
       // ---- Actions ------------------------------------------------------
       function me() { return players[myId]; }
@@ -666,7 +702,7 @@
       }
 
       // One note card centred on (cx, cy), drawn at full size then scaled.
-      function drawNoteCard(text, cx, cy, s, raised) {
+      function drawNoteCard(n, cx, cy, s, raised) {
         ctx.save();
         ctx.translate(cx, cy);
         ctx.scale(s, s);
@@ -681,24 +717,48 @@
         ctx.beginPath(); ctx.arc(0, y + 8, 4, 0, Math.PI * 2); ctx.fill();
         ctx.fillStyle = "#2b2418";
         ctx.font = "13px Georgia, serif";
-        wrapLines(text, NOTE_W - 20, 6).forEach((l, i) => ctx.fillText(l, x + 10, y + 30 + i * 16));
+        wrapLines(n.text, NOTE_W - 20, 6).forEach((l, i) => ctx.fillText(l, x + 10, y + 30 + i * 16));
+        drawSeals(n, -x, y);
         ctx.restore();
       }
 
-      function drawNotes() {
-        for (const n of notes) drawNoteCard(n.text, n.x, n.y, n.scale ?? 1, false);
+      // Wax seals along the card's top-right edge, with the total beside them.
+      // A gold ring marks the seal that's mine.
+      function drawSeals(n, right, top) {
+        const votes = n.votes || 0;
+        if (!votes) return;
+        const shown = Math.min(votes, 5);
+        const cy = top + 11;
+        for (let i = 0; i < shown; i++) {
+          const cx = right - 12 - i * 10;
+          ctx.fillStyle = "#8e2f2a";
+          ctx.beginPath(); ctx.arc(cx, cy, 6.5, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#c8413a";
+          ctx.beginPath(); ctx.arc(cx - 0.5, cy - 0.5, 4.5, 0, Math.PI * 2); ctx.fill();
+          if (i === 0 && myBallot.includes(n.id)) {
+            ctx.strokeStyle = "#e8c15a"; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(cx, cy, 8.5, 0, Math.PI * 2); ctx.stroke();
+          }
+        }
+        ctx.fillStyle = "#6b2420";
+        ctx.font = "700 12px system-ui, sans-serif";
+        ctx.textAlign = "right";
+        ctx.fillText(String(votes), right - 12 - shown * 10 - 2, cy + 4);
+        ctx.textAlign = "left";
       }
 
-      // Once a room has filled up and its cards have shrunk, the card you're
-      // standing nearest pops up full size so you can read it.
-      function noteToRead() {
+      function drawNotes() {
+        for (const n of notes) drawNoteCard(n, n.x, n.y, n.scale ?? 1, false);
+      }
+
+      // The note card I'm on or just beside (mirrors the server's noteAt).
+      function noteNear() {
         const p = me();
         if (!p) return null;
         let best = null, bestD = Infinity;
         for (const n of notes) {
           const s = n.scale ?? 1;
-          if (s >= 1) continue;
-          const hw = (NOTE_W * s) / 2 + 20, hh = (NOTE_H * s) / 2 + 20;
+          const hw = (NOTE_W * s) / 2 + NOTE_REACH, hh = (NOTE_H * s) / 2 + NOTE_REACH;
           if (Math.abs(p.x - n.x) > hw || Math.abs(p.y - n.y) > hh) continue;
           const d = Math.hypot(p.x - n.x, p.y - n.y);
           if (d < bestD) { bestD = d; best = n; }
@@ -706,9 +766,11 @@
         return best;
       }
 
+      // Once a room has filled up and its cards have shrunk, the card you're
+      // standing nearest pops up full size so you can read it.
       function drawRaisedNote() {
-        const n = noteToRead();
-        if (!n) return;
+        const n = noteNear();
+        if (!n || (n.scale ?? 1) >= 1) return;
         // keep the enlarged card inside its room so it doesn't spill over walls
         const a = areas.find((a) => a.name === n.room);
         let x = n.x, y = n.y;
@@ -716,7 +778,7 @@
           x = Math.max(a.x + NOTE_W / 2, Math.min(a.x + a.w - NOTE_W / 2, x));
           y = Math.max(a.y + NOTE_H / 2, Math.min(a.y + a.h - NOTE_H / 2, y));
         }
-        drawNoteCard(n.text, x, y, 1, true);
+        drawNoteCard(n, x, y, 1, true);
       }
 
       // Contextual help pinned to the bottom of the screen.
@@ -732,6 +794,11 @@
           text = canWrite() ? "R — write a note"
                : !p.carrying ? "You need a quill to write"
                : "You need a blank parchment to write";
+        } else if (noteNear()) {
+          const left = maxSeals - myBallot.length;
+          text = myBallot.includes(noteNear().id) ? "V — take your seal back"
+               : left > 0 ? `V — press a seal onto this note (${left} left)`
+               : "No seals left — take one back from another note";
         }
         if (!text) return;
         ctx.save();

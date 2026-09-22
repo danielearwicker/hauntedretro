@@ -35,6 +35,7 @@ URL (e.g. `http://127.0.0.1:8787/#sprint-42`) to create separate rooms.
 - **F** — pin the note you're carrying in the room you're standing in
 - **V** — press one of your wax seals onto the note you're standing at, or
   take it back
+- **E** at the bell in the Lobby — show the results; ring again to reopen voting
 
 ## The retro
 
@@ -52,6 +53,12 @@ Then vote: everyone has 3 wax seals, at most one per note, and can move them
 around freely. Cards show their total; a gold ring marks your own seal. Votes
 are anonymous — only totals are broadcast — and your ballot is tied to your
 browser tab, so a refresh keeps it (a new tab is a new voter).
+
+When everyone's done, someone rings the **bell** in the Lobby. Voting closes,
+each room's notes glide into order of votes, and the top three get
+1st/2nd/3rd rosettes. Writing still works but pinning waits until someone
+rings the bell again, which reopens voting and puts every note back where it
+was pinned.
 
 Notes are anonymous. An unpinned note turns back into a blank parchment if
 its carrier leaves.

@@ -17,7 +17,9 @@ import { routePartykitRequest, Server, type Connection } from "partyserver";
  * retro prompt. Players write notes at the writing desks in the Scriptorium
  * (needs a quill + a blank parchment), carry them out, and pin them in the
  * room whose prompt they answer. Then everyone votes by pressing wax seals
- * onto notes: VOTES_PER_PLAYER each, at most one per note.
+ * onto notes: VOTES_PER_PLAYER each, at most one per note. Ringing the bell
+ * in the Lobby shows the results: voting closes and each room's notes line
+ * up in order of votes. Ringing it again reopens voting.
  *
  * PERSISTENCE: the board (pinned notes) is saved to Durable Object storage on
  * every change and reloaded in onStart, so a retro survives the room going
@@ -40,7 +42,12 @@ type Player = {
 type Quill = { id: string; x: number; y: number; heldBy: string | null };
 type Parchment = { id: string; x: number; y: number };
 // x, y is the card's centre; scale shrinks cards when a room fills up.
-type Note = { id: string; text: string; room: string; slot: number; x: number; y: number; scale: number; votes: number };
+// x, y is where the note was pinned (its slot). While results are showing,
+// rx, ry is where it sits in vote order and rank is its place in its room.
+type Note = {
+  id: string; text: string; room: string; slot: number; x: number; y: number; scale: number; votes: number;
+  rx?: number; ry?: number; rank?: number;
+};
 type Rect = { x: number; y: number; w: number; h: number };
 type Door = { side: "top" | "bottom" | "left" | "right"; from: number; to: number };
 type Area = Rect & { name?: string; prompt?: string; doors: Door[] };
@@ -63,6 +70,8 @@ const NOTE_MARGIN = 12;
 const NOTE_SHRINK = 0.85;  // scale step when a room runs out of slots
 const NOTE_REACH = 20;     // how far outside a card you can be and still vote on it
 const VOTES_PER_PLAYER = 3;
+const BELL = { x: 1460, y: 1052 }; // in the Lobby, by the Scriptorium door
+const BELL_RANGE = 48;
 
 // Card slots in a column room at a given scale, as centre points in row-major order.
 function noteSlots(a: Rect, scale: number) {
@@ -201,7 +210,10 @@ function buildWalls(layout: Area[], t: number): Rect[] {
 // What's saved in Durable Object storage under the "board" key.
 // ballots maps voter id -> ids of the notes they've sealed. Only totals are
 // broadcast; each voter is sent their own ballot privately.
-type Board = { notes: Note[]; roomScale: Record<string, number>; nextId: number; ballots: Record<string, string[]> };
+type Board = {
+  notes: Note[]; roomScale: Record<string, number>; nextId: number; ballots: Record<string, string[]>;
+  results: boolean;
+};
 
 interface Env {
   Main: DurableObjectNamespace;
@@ -214,6 +226,7 @@ export class Main extends Server<Env> {
   notes: Note[] = []; // pinned retro notes; they outlive the players who wrote them
   roomScale: Record<string, number> = {}; // current note scale per column room
   ballots: Record<string, string[]> = {};
+  results = false; // true while the bell has been rung: voting closed, notes in vote order
   nextId = 1;
 
   async onStart() {
@@ -223,16 +236,20 @@ export class Main extends Server<Env> {
     this.roomScale = board.roomScale;
     this.nextId = board.nextId;
     this.ballots = board.ballots ?? {};
+    this.results = board.results ?? false;
     for (const n of this.notes) n.votes ??= 0;
     // Re-fit every room to the current layout, in case rooms or the note
     // grid changed since the board was saved.
     for (const a of LAYOUT) if (a.prompt) this.fitRoom(a, 0);
+    this.layoutResults();
   }
 
   saveBoard() {
     // Not awaited: Durable Object output gates hold outgoing messages until
     // the write is durable, so nobody sees a pin that could be lost.
-    const board: Board = { notes: this.notes, roomScale: this.roomScale, nextId: this.nextId, ballots: this.ballots };
+    const board: Board = {
+      notes: this.notes, roomScale: this.roomScale, nextId: this.nextId, ballots: this.ballots, results: this.results,
+    };
     this.ctx.storage.put("board", board);
   }
 
@@ -258,7 +275,7 @@ export class Main extends Server<Env> {
     conn.send(JSON.stringify({
       type: "init",
       you: conn.id,
-      map: { world: WORLD, walls: WALLS, areas: AREAS, desks: DESKS, decor: DECOR },
+      map: { world: WORLD, walls: WALLS, areas: AREAS, desks: DESKS, decor: DECOR, bell: BELL },
       ...this.snapshot(),
     }));
     this.broadcast(JSON.stringify({ type: "snapshot", ...this.snapshot() }), [conn.id]);
@@ -284,7 +301,7 @@ export class Main extends Server<Env> {
 
       case "vote": {
         // Toggle your seal on the note you're standing at.
-        const note = player.voter && this.noteAt(player);
+        const note = !this.results && player.voter && this.noteAt(player);
         if (!note) break;
         const mine = (this.ballots[player.voter!] ??= []);
         const i = mine.indexOf(note.id);
@@ -293,6 +310,16 @@ export class Main extends Server<Env> {
         else break;
         this.saveBoard();
         this.sendBallot(sender, player);
+        this.pushSnapshot();
+        break;
+      }
+
+      case "ring": {
+        if (dist(player, BELL) > BELL_RANGE) break;
+        this.results = !this.results;
+        this.layoutResults();
+        this.saveBoard();
+        this.broadcast(JSON.stringify({ type: "bell", by: player.name, results: this.results }));
         this.pushSnapshot();
         break;
       }
@@ -363,7 +390,7 @@ export class Main extends Server<Env> {
       case "pin": {
         // Pin the carried note in whichever column room you're standing in.
         const area = namedAreaAt(player);
-        if (!player.note || !area?.prompt) break;
+        if (this.results || !player.note || !area?.prompt) break;
         this.pinNote(area, player.note, player);
         player.note = null;
         this.saveBoard();
@@ -411,6 +438,23 @@ export class Main extends Server<Env> {
     const inRoom = this.notes.filter((n) => n.room === area.name);
     const slot = nearestFreeSlot(slots, new Set(inRoom.map((n) => n.slot)), at);
     this.notes.push({ ...note, room: area.name!, slot, ...slots[slot], scale: this.roomScale[area.name!], votes: 0 });
+  }
+
+  // While results are showing, line each room's notes up in its slots in
+  // order of votes (ties keep pinning order); otherwise clear that layout.
+  layoutResults() {
+    for (const a of LAYOUT) {
+      if (!a.prompt) continue;
+      const inRoom = this.notes.filter((n) => n.room === a.name);
+      if (!this.results) {
+        for (const n of inRoom) { delete n.rx; delete n.ry; delete n.rank; }
+        continue;
+      }
+      const slots = noteSlots(a, this.roomScale[a.name!] ?? 1);
+      inRoom.sort((p, q) => q.votes - p.votes || p.slot - q.slot).forEach((n, i) => {
+        n.rx = slots[i].x; n.ry = slots[i].y; n.rank = i + 1;
+      });
+    }
   }
 
   // The note card nearest to p, if p is on or just beside it.
@@ -470,7 +514,10 @@ export class Main extends Server<Env> {
   }
 
   snapshot() {
-    return { world: WORLD, players: this.players, quills: this.quills, parchments: this.parchments, notes: this.notes };
+    return {
+      world: WORLD, players: this.players, quills: this.quills, parchments: this.parchments,
+      notes: this.notes, results: this.results,
+    };
   }
 
   pushSnapshot() {

@@ -105,6 +105,8 @@
         <kbd>F</kbd> pin your note in the room whose question it answers<br />
         <kbd>V</kbd> press one of your wax seals onto the note you're standing
         at (again to take it back)<br />
+        <kbd>E</kbd> at the bell in the Lobby — show the results (and again to
+        reopen voting)<br />
         The number by each avatar is how many parchments they hold.
       </div>
     </div>
@@ -160,6 +162,12 @@
       let parchments = []; // scattered on the ground: [{ id, x, y }]
       let notes = [];      // pinned retro notes: [{ id, text, room, x, y, scale, votes }]
       let myBallot = [];   // ids of the notes I've sealed
+      let results = false; // bell rung: voting closed, notes shown in vote order
+      let bell = null;     // { x, y } of the Lobby bell
+      let bellRungAt = -1e9;          // performance.now() of the last ring, for the wobble
+      let banner = null;              // { text, until } — a short announcement
+      const noteDraw = {};            // note id -> { x, y } drawn position, easing toward its target
+      const BELL_RANGE = 48;          // must match the server
       let maxSeals = 3;
 
       // ---- Map (received from the server on init) ----------------------
@@ -248,11 +256,11 @@
       addEventListener("keydown", (e) => {
         if (document.activeElement === nameInput || writerOpen()) return;
         keys[e.key.toLowerCase()] = true;
-        if (e.key.toLowerCase() === "e") send({ type: "grab" });     // server decides what
+        if (e.key.toLowerCase() === "e") send({ type: nearBell() ? "ring" : "grab" }); // server decides what
         if (e.key.toLowerCase() === "q") tryDrop();
         if (e.key.toLowerCase() === "r" && canWrite()) { e.preventDefault(); openWriter(); }
         if (e.key.toLowerCase() === "f" && canPin()) send({ type: "pin" });
-        if (e.key.toLowerCase() === "v" && noteNear()) send({ type: "vote" });
+        if (e.key.toLowerCase() === "v" && !results && noteNear()) send({ type: "vote" });
         if (["arrowup", "arrowdown", "arrowleft", "arrowright"].includes(e.key.toLowerCase())) e.preventDefault();
       });
       addEventListener("keyup", (e) => { keys[e.key.toLowerCase()] = false; });
@@ -313,6 +321,8 @@
             if (msg.map) {
               walls = msg.map.walls || []; areas = msg.map.areas || [];
               desks = msg.map.desks || []; decor = msg.map.decor || [];
+              bell = msg.map.bell || null;
+              if (bell) loadSprite("bell");
               for (const d of decor) loadSprite(d.kind);
             }
             applySnapshot(msg);
@@ -320,6 +330,14 @@
             break;
           case "snapshot":
             applySnapshot(msg);
+            break;
+          case "bell":
+            bellRungAt = performance.now();
+            banner = {
+              text: msg.results ? `🔔 ${msg.by} rang the bell — here are the results!`
+                                : `🔔 ${msg.by} rang the bell — voting is open again`,
+              until: performance.now() + 4000,
+            };
             break;
           case "ballot":
             myBallot = msg.notes || [];
@@ -342,6 +360,7 @@
         quills = Object.fromEntries(s.quills.map((q) => [q.id, q]));
         parchments = s.parchments;
         notes = s.notes || [];
+        results = !!s.results;
 
         const merged = {};
         for (const id in s.players) {
@@ -409,7 +428,15 @@
       }
       function canPin() {
         const p = me();
-        return !!p && !!p.note && !!namedAreaAt(p)?.prompt;
+        return !results && !!p && !!p.note && !!namedAreaAt(p)?.prompt;
+      }
+      function nearBell() {
+        const p = me();
+        return !!p && !!bell && Math.hypot(p.x - bell.x, p.y - bell.y) <= BELL_RANGE;
+      }
+      // Where a note should be: its vote-order place while results show.
+      function noteTarget(n) {
+        return results && n.rx !== undefined ? { x: n.rx, y: n.ry } : { x: n.x, y: n.y };
       }
 
       // Mirror of the server's grab logic, used ONLY to draw the E hint.
@@ -552,6 +579,7 @@
 
         ctx.restore();
         drawActionHint();
+        drawBanner();
       }
 
       function drawGrid() {
@@ -622,6 +650,12 @@
 
       function drawDecor() {
         for (const d of allProps()) drawSprite(d.kind, d.x, d.y, d.rot);
+        if (bell) {
+          // swings for a couple of seconds after it's rung
+          const t = (performance.now() - bellRungAt) / 1000;
+          const swing = t < 2 ? 25 * Math.sin(t * 18) * (1 - t / 2) : 0;
+          drawSprite("bell", bell.x, bell.y, swing);
+        }
       }
 
       // Flickering pools of candle/lantern light, plus moonlight under windows.
@@ -719,7 +753,25 @@
         ctx.font = "13px Georgia, serif";
         wrapLines(n.text, NOTE_W - 20, 6).forEach((l, i) => ctx.fillText(l, x + 10, y + 30 + i * 16));
         drawSeals(n, -x, y);
+        if (results && n.rank <= 3 && n.votes > 0) drawRibbon(n.rank, x, y);
         ctx.restore();
+      }
+
+      // A 1st/2nd/3rd rosette on the card's top-left corner.
+      function drawRibbon(rank, x, y) {
+        const c = ["#e8c15a", "#c9ced6", "#c98a4a"][rank - 1];
+        const cx = x, cy = y;
+        ctx.fillStyle = "#8e2f2a";
+        ctx.beginPath(); ctx.moveTo(cx - 6, cy); ctx.lineTo(cx - 10, cy + 20); ctx.lineTo(cx - 3, cy + 16);
+        ctx.lineTo(cx, cy + 22); ctx.lineTo(cx + 3, cy + 16); ctx.lineTo(cx + 10, cy + 20); ctx.lineTo(cx + 6, cy); ctx.fill();
+        ctx.fillStyle = c;
+        ctx.beginPath(); ctx.arc(cx, cy, 11, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,0.3)"; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.fillStyle = "#2b2418";
+        ctx.font = "700 11px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(["1st", "2nd", "3rd"][rank - 1], cx, cy + 4);
+        ctx.textAlign = "left";
       }
 
       // Wax seals along the card's top-right edge, with the total beside them.
@@ -748,7 +800,16 @@
       }
 
       function drawNotes() {
-        for (const n of notes) drawNoteCard(n, n.x, n.y, n.scale ?? 1, false);
+        // Cards glide to their new places when the bell is rung.
+        for (const n of notes) {
+          const t = noteTarget(n);
+          const d = (noteDraw[n.id] ??= { x: t.x, y: t.y });
+          d.x += (t.x - d.x) * 0.08; d.y += (t.y - d.y) * 0.08;
+          // cards with no votes fade back while results are showing
+          ctx.globalAlpha = results && !n.votes ? 0.6 : 1;
+          drawNoteCard(n, d.x, d.y, n.scale ?? 1, false);
+        }
+        ctx.globalAlpha = 1;
       }
 
       // The note card I'm on or just beside (mirrors the server's noteAt).
@@ -758,9 +819,10 @@
         let best = null, bestD = Infinity;
         for (const n of notes) {
           const s = n.scale ?? 1;
+          const { x, y } = noteTarget(n);
           const hw = (NOTE_W * s) / 2 + NOTE_REACH, hh = (NOTE_H * s) / 2 + NOTE_REACH;
-          if (Math.abs(p.x - n.x) > hw || Math.abs(p.y - n.y) > hh) continue;
-          const d = Math.hypot(p.x - n.x, p.y - n.y);
+          if (Math.abs(p.x - x) > hw || Math.abs(p.y - y) > hh) continue;
+          const d = Math.hypot(p.x - x, p.y - y);
           if (d < bestD) { bestD = d; best = n; }
         }
         return best;
@@ -773,7 +835,7 @@
         if (!n || (n.scale ?? 1) >= 1) return;
         // keep the enlarged card inside its room so it doesn't spill over walls
         const a = areas.find((a) => a.name === n.room);
-        let x = n.x, y = n.y;
+        let { x, y } = noteTarget(n);
         if (a) {
           x = Math.max(a.x + NOTE_W / 2, Math.min(a.x + a.w - NOTE_W / 2, x));
           y = Math.max(a.y + NOTE_H / 2, Math.min(a.y + a.h - NOTE_H / 2, y));
@@ -786,14 +848,19 @@
         const p = me();
         if (!p) return;
         let text = null;
-        if (p.note) {
+        if (nearBell()) {
+          text = results ? "E — ring the bell to reopen voting" : "E — ring the bell to show the results";
+        } else if (p.note) {
           const a = namedAreaAt(p);
-          text = a?.prompt ? `F — pin your note in the ${a.name}`
+          text = results && a?.prompt ? "Results are showing — ring the Lobby bell to reopen the board"
+               : a?.prompt ? `F — pin your note in the ${a.name}`
                : "Carry your note to the Workshop, Garden or Library";
         } else if (atDesk()) {
           text = canWrite() ? "R — write a note"
                : !p.carrying ? "You need a quill to write"
                : "You need a blank parchment to write";
+        } else if (noteNear() && results) {
+          text = "Voting is closed while the results are showing";
         } else if (noteNear()) {
           const left = maxSeals - myBallot.length;
           text = myBallot.includes(noteNear().id) ? "V — take your seal back"
@@ -801,12 +868,23 @@
                : "No seals left — take one back from another note";
         }
         if (!text) return;
+        drawPill(text, innerHeight - 64);
+      }
+
+      // Announcements after the bell, and a reminder while results show.
+      function drawBanner() {
+        const now = performance.now();
+        if (banner && now < banner.until) drawPill(banner.text, 16, "rgba(90,60,20,0.92)");
+        else if (results) drawPill("🏆 Results — voting is closed. Ring the Lobby bell to reopen.", 16, "rgba(90,60,20,0.85)");
+      }
+
+      function drawPill(text, y, bg = "rgba(20,24,33,0.88)") {
         ctx.save();
         ctx.scale(dpr, dpr);
         ctx.font = "600 14px system-ui, sans-serif";
         const w = ctx.measureText(text).width + 28;
-        const x = innerWidth / 2 - w / 2, y = innerHeight - 64;
-        ctx.fillStyle = "rgba(20,24,33,0.88)";
+        const x = innerWidth / 2 - w / 2;
+        ctx.fillStyle = bg;
         roundRect(x, y, w, 32, 16); ctx.fill();
         ctx.fillStyle = "#e6e9ef";
         ctx.textAlign = "center";

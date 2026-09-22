@@ -49,6 +49,11 @@ one it answers and pin it there:
 Notes are anonymous. An unpinned note turns back into a blank parchment if
 its carrier leaves.
 
+Each room's board of pinned notes is saved in its Durable Object's storage, so
+it survives everyone leaving, redeploys and (under `wrangler dev`) code
+reloads. Locally that storage lives in `.wrangler/state`; delete it to wipe
+every board, or just use a new `#roomname`.
+
 ## How it fits together
 
 | File | Role |
@@ -79,5 +84,3 @@ The game goes live at `https://hauntedretro.<your-subdomain>.workers.dev`.
 ## Where to take it next (toward a real retro)
 
 - **Voting** — players spend tokens on notes; the Durable Object tallies live.
-- **Persistence** — store the board in Durable Object storage so a retro
-  survives a refresh.

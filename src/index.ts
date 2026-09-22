@@ -17,6 +17,11 @@ import { routePartykitRequest, Server, type Connection } from "partyserver";
  * retro prompt. Players write notes at the writing desks in the Scriptorium
  * (needs a quill + a blank parchment), carry them out, and pin them in the
  * room whose prompt they answer.
+ *
+ * PERSISTENCE: the board (pinned notes) is saved to Durable Object storage on
+ * every change and reloaded in onStart, so a retro survives the room going
+ * idle, redeploys and — under `wrangler dev` — code reloads. Players, quills
+ * and loose parchments are not saved; they come and go with connections.
  */
 
 type Player = {
@@ -189,6 +194,9 @@ function buildWalls(layout: Area[], t: number): Rect[] {
   return out;
 }
 
+// What's saved in Durable Object storage under the "board" key.
+type Board = { notes: Note[]; roomScale: Record<string, number>; nextId: number };
+
 interface Env {
   Main: DurableObjectNamespace;
 }
@@ -200,6 +208,24 @@ export class Main extends Server<Env> {
   notes: Note[] = []; // pinned retro notes; they outlive the players who wrote them
   roomScale: Record<string, number> = {}; // current note scale per column room
   nextId = 1;
+
+  async onStart() {
+    const board = await this.ctx.storage.get<Board>("board");
+    if (!board) return;
+    this.notes = board.notes;
+    this.roomScale = board.roomScale;
+    this.nextId = board.nextId;
+    // Re-fit every room to the current layout, in case rooms or the note
+    // grid changed since the board was saved.
+    for (const a of LAYOUT) if (a.prompt) this.fitRoom(a, 0);
+  }
+
+  saveBoard() {
+    // Not awaited: Durable Object output gates hold outgoing messages until
+    // the write is durable, so nobody sees a pin that could be lost.
+    const board: Board = { notes: this.notes, roomScale: this.roomScale, nextId: this.nextId };
+    this.ctx.storage.put("board", board);
+  }
 
   onConnect(conn: Connection) {
     const color = PLAYER_COLORS[Object.keys(this.players).length % PLAYER_COLORS.length];
@@ -309,6 +335,7 @@ export class Main extends Server<Env> {
         if (!player.note || !area?.prompt) break;
         this.pinNote(area, player.note, player);
         player.note = null;
+        this.saveBoard();
         this.pushSnapshot();
         break;
       }
@@ -347,26 +374,37 @@ export class Main extends Server<Env> {
     this.pushSnapshot();
   }
 
-  // Put a note in the free slot nearest to `at`. If the room is full, shrink
-  // every card in it a step and re-slot them near where they were, so the
-  // board keeps its rough shape rather than being reshuffled.
+  // Put a note in the free slot nearest to `at`, making room first if needed.
   pinNote(area: Area, note: { id: string; text: string }, at: { x: number; y: number }) {
+    const slots = this.fitRoom(area, 1);
+    const inRoom = this.notes.filter((n) => n.room === area.name);
+    const slot = nearestFreeSlot(slots, new Set(inRoom.map((n) => n.slot)), at);
+    this.notes.push({ ...note, room: area.name!, slot, ...slots[slot], scale: this.roomScale[area.name!] });
+  }
+
+  // Make sure a room's grid has space for its notes plus `extra` more,
+  // shrinking every card a step at a time until it does. Each note is then
+  // re-slotted near where it was, so the board keeps its rough shape rather
+  // than being reshuffled. Returns the room's slots.
+  fitRoom(area: Area, extra: number) {
     const room = area.name!;
     const inRoom = this.notes.filter((n) => n.room === room);
-    let scale = this.roomScale[room] ?? 1;
+    const oldScale = this.roomScale[room] ?? 1;
+    let scale = oldScale;
     let slots = noteSlots(area, scale);
-    if (slots.length <= inRoom.length) {
-      while (slots.length <= inRoom.length) slots = noteSlots(area, (scale *= NOTE_SHRINK));
+    while (slots.length < inRoom.length + extra) slots = noteSlots(area, (scale *= NOTE_SHRINK));
+    this.roomScale[room] = scale;
+    const moved = scale !== oldScale ||
+      inRoom.some((n) => !slots[n.slot] || slots[n.slot].x !== n.x || slots[n.slot].y !== n.y);
+    if (moved) {
       const taken = new Set<number>();
       for (const n of [...inRoom].sort((a, b) => a.slot - b.slot)) {
         n.slot = nearestFreeSlot(slots, taken, n);
         taken.add(n.slot);
         Object.assign(n, slots[n.slot], { scale });
       }
-      this.roomScale[room] = scale;
     }
-    const slot = nearestFreeSlot(slots, new Set(inRoom.map((n) => n.slot)), at);
-    this.notes.push({ ...note, room, slot, ...slots[slot], scale });
+    return slots;
   }
 
   // ---- helpers ------------------------------------------------------------

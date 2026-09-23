@@ -25,6 +25,12 @@ import { routePartykitRequest, Server, type Connection } from "partyserver";
  * few kinds (MOVER_KINDS) roll away when nudged. The server runs their
  * physics, ticking only while something is moving, and saves where they rest.
  *
+ * AIR HOCKEY: a table in the west end of the Library. Walk into either end to
+ * take that end's mallet; your movement keys then drive the mallet (the
+ * client sends its position) until you push it back off your end. The server
+ * runs the puck. With two players a score is kept, reset when the second
+ * player arrives.
+ *
  * PERSISTENCE: the board (pinned notes) is saved to Durable Object storage on
  * every change and reloaded in onStart, so a retro survives the room going
  * idle, redeploys and — under `wrangler dev` — code reloads. Players, quills
@@ -54,7 +60,8 @@ type Note = {
 };
 type Rect = { x: number; y: number; w: number; h: number };
 type Door = { side: "top" | "bottom" | "left" | "right"; from: number; to: number };
-type Area = Rect & { name?: string; prompt?: string; doors: Door[] };
+// notes: where pinned notes may go, if not the whole room.
+type Area = Rect & { name?: string; prompt?: string; notes?: Rect; doors: Door[] };
 
 const WORLD = { w: 3000, h: 2500 };
 const WALL_T = 16;
@@ -78,9 +85,10 @@ const BELL = { x: 1460, y: 1052 }; // in the Lobby, by the Scriptorium door
 const BELL_RANGE = 48;
 
 // Card slots in a column room at a given scale, as centre points in row-major order.
-function noteSlots(a: Rect, scale: number) {
+function noteSlots(room: Area, scale: number) {
+  const a = room.notes ?? room;
   const w = NOTE_W * scale, h = NOTE_H * scale, g = NOTE_GAP * scale;
-  const uw = a.w - 2 * NOTE_MARGIN, uh = a.h - NOTE_TOP - NOTE_MARGIN;
+  const uw = a.w - 2 * NOTE_MARGIN, uh = a.h - NOTE_TOP - NOTE_MARGIN; // NOTE_TOP clears the room's title
   const cols = Math.max(1, Math.floor((uw + g) / (w + g)));
   const rows = Math.max(1, Math.floor((uh + g) / (h + g)));
   const x0 = a.x + NOTE_MARGIN + (uw - (cols * (w + g) - g)) / 2 + w / 2;
@@ -108,8 +116,9 @@ const LAYOUT: Area[] = [
   { name: "Scriptorium", x: 1200, y: 240, w: 800, h: 360, doors: [{ side: "bottom", from: 1504, to: 1696 }] },
   { name: "Garden", prompt: "What have you grown (in tools or product)?",
     x: 1200, y: 2000, w: 800, h: 360, doors: [{ side: "top", from: 1504, to: 1696 }] },
-  { name: "Library", prompt: "What have you learned?",
-    x: 400, y: 1040, w: 480, h: 560, doors: [{ side: "right", from: 1224, to: 1416 }] },
+  // The west end of the Library holds the air hockey table, so notes stay east of it.
+  { name: "Library", prompt: "What have you learned?", notes: { x: 430, y: 1040, w: 450, h: 560 },
+    x: 160, y: 1040, w: 720, h: 560, doors: [{ side: "right", from: 1224, to: 1416 }] },
   { name: "Workshop", prompt: "Things that need fixing",
     x: 2320, y: 1000, w: 560, h: 600, doors: [{ side: "left", from: 1224, to: 1416 }] },
   { x: 1504, y: 600, w: 192, h: 400, doors: [{ side: "top", from: 1504, to: 1696 }, { side: "bottom", from: 1504, to: 1696 }] },
@@ -138,7 +147,8 @@ const DECOR: Decor[] = [
   { kind: "candelabra", x: 1600, y: 450 },
   { kind: "cobweb", x: 1972, y: 268, rot: 90 }, { kind: "cobweb", x: 1228, y: 572, rot: 270 },
   // Library
-  { kind: "bookshelf", x: 420, y: 1190 }, { kind: "bookshelf", x: 420, y: 1355 }, { kind: "bookshelf", x: 420, y: 1520 },
+  { kind: "bookshelf", x: 180, y: 1190 }, { kind: "bookshelf", x: 180, y: 1355 }, { kind: "bookshelf", x: 180, y: 1520 },
+  { kind: "airhockey", x: 320, y: 1300 },
   { kind: "bookshelf", x: 780, y: 1060, rot: 90 }, { kind: "bookshelf", x: 560, y: 1580, rot: 90 },
   { kind: "globe", x: 690, y: 1560 },
   { kind: "armchair", x: 800, y: 1520, rot: 140 }, { kind: "lamp", x: 856, y: 1470 },
@@ -177,7 +187,43 @@ const COLLIDERS: Record<string, { r?: number; w?: number; h?: number; dx?: numbe
   bookshelf: { w: 38, h: 156 }, armchair: { r: 24 }, lamp: { r: 12 }, globe: { r: 16 },
   workbench: { w: 56, h: 196 }, anvil: { w: 58, h: 36 }, crate: { w: 42, h: 42 },
   tree: { r: 48 }, pond: { w: 136, h: 74 }, flowerbed: { w: 200, h: 38 }, sprouts: { w: 118, h: 56 },
+  airhockey: { w: 150, h: 300 },
 };
+
+// ---- Air hockey ---------------------------------------------------------------
+
+// The table (matches the airhockey decor entry and public/decor/airhockey.svg):
+// its playing surface, goal mouths in the middle of each end, puck and mallets.
+const HOCKEY = (() => {
+  const t = { x: 245, y: 1150, w: 150, h: 300 }, rail = 8;
+  const play = { x: t.x + rail, y: t.y + rail, w: t.w - 2 * rail, h: t.h - 2 * rail };
+  return { table: t, play, cx: t.x + t.w / 2, mid: t.y + t.h / 2, goalW: 56, puckR: 9, malletR: 14 };
+})();
+type End = "top" | "bottom";
+const HOCKEY_JOIN_RANGE = 40;   // how close to the middle of an end you must be to take it
+const HOCKEY_TICK_MS = 16;
+const PUCK_FRICTION = 0.75;     // fraction of speed kept per second — it glides
+const PUCK_MAX_SPEED = 800;
+const PUCK_BOUNCE = 0.9;
+// Fastest a mallet can really move (walking speed x the client's MALLET_SPEED,
+// with headroom); caps speed estimates from bunched-up network messages.
+const MALLET_MAX_SPEED = 520;
+
+// Where an end's mallet may go: its own half of the surface.
+function malletBounds(end: End) {
+  const { play, mid, malletR: r } = HOCKEY;
+  return {
+    x0: play.x + r, x1: play.x + play.w - r,
+    y0: end === "top" ? play.y + r : mid + r,
+    y1: end === "top" ? mid - r : play.y + play.h - r,
+  };
+}
+
+// The middle of an end, where the player stands.
+function endPoint(end: End) {
+  const { table, cx } = HOCKEY;
+  return { x: cx, y: end === "top" ? table.y : table.y + table.h };
+}
 
 // Props that roll away when nudged. Heavier ones budge less.
 const MOVER_KINDS: Record<string, { r: number; mass: number }> = {
@@ -323,6 +369,17 @@ export class Main extends Server<Env> {
   movers: Mover[] = initialMovers();
   moverTicker: ReturnType<typeof setInterval> | null = null;
   lastMove: Record<string, { x: number; y: number; t: number }> = {}; // for players' push speed
+  hockey = {
+    ends: { top: null as string | null, bottom: null as string | null }, // player ids
+    mallets: {
+      top: { x: HOCKEY.cx, y: HOCKEY.play.y + 30, vx: 0, vy: 0, t: 0 },
+      bottom: { x: HOCKEY.cx, y: HOCKEY.play.y + HOCKEY.play.h - 30, vx: 0, vy: 0, t: 0 },
+    },
+    puck: { x: HOCKEY.cx, y: HOCKEY.mid, vx: 0, vy: 0 },
+    score: { top: 0, bottom: 0 },
+    dirty: false, // something changed since the last broadcast
+  };
+  hockeyTicker: ReturnType<typeof setInterval> | null = null;
   nextId = 1;
 
   async onStart() {
@@ -373,7 +430,10 @@ export class Main extends Server<Env> {
     conn.send(JSON.stringify({
       type: "init",
       you: conn.id,
-      map: { world: WORLD, walls: WALLS, areas: AREAS, desks: DESKS, decor: STATIC_DECOR, bell: BELL, solids: SOLIDS },
+      map: {
+        world: WORLD, walls: WALLS, areas: AREAS, desks: DESKS, decor: STATIC_DECOR, bell: BELL, solids: SOLIDS,
+        hockey: HOCKEY,
+      },
       ...this.snapshot(),
     }));
     this.broadcast(JSON.stringify({ type: "snapshot", ...this.snapshot() }), [conn.id]);
@@ -419,6 +479,51 @@ export class Main extends Server<Env> {
         this.saveBoard();
         this.broadcast(JSON.stringify({ type: "bell", by: player.name, results: this.results }));
         this.pushSnapshot();
+        break;
+      }
+
+      case "hockeyJoin": {
+        const end: End = msg.end === "bottom" ? "bottom" : "top";
+        const h = this.hockey;
+        if (h.ends[end] || h.ends.top === player.id || h.ends.bottom === player.id) break;
+        if (dist(player, endPoint(end)) > HOCKEY_JOIN_RANGE) break;
+        h.ends[end] = player.id;
+        const b = malletBounds(end);
+        Object.assign(h.mallets[end], { x: HOCKEY.cx, y: end === "top" ? b.y0 : b.y1, vx: 0, vy: 0, t: Date.now() });
+        if (h.ends.top && h.ends.bottom) {
+          // a new match: fresh score, puck on the centre spot
+          h.score = { top: 0, bottom: 0 };
+          Object.assign(h.puck, { x: HOCKEY.cx, y: HOCKEY.mid, vx: 0, vy: 0 });
+        }
+        this.startHockey();
+        this.pushSnapshot();
+        break;
+      }
+
+      case "hockeyLeave": {
+        this.leaveHockey(player.id);
+        break;
+      }
+
+      case "mallet": {
+        const h = this.hockey;
+        const end: End | null = h.ends.top === player.id ? "top" : h.ends.bottom === player.id ? "bottom" : null;
+        if (!end) break;
+        const b = malletBounds(end), m = h.mallets[end], now = Date.now();
+        const x = clamp(msg.x, b.x0, b.x1), y = clamp(msg.y, b.y0, b.y1);
+        const dt = clamp((now - m.t) / 1000, 0.008, 0.2);
+        let vx = (x - m.x) / dt, vy = (y - m.y) / dt;
+        const v = Math.hypot(vx, vy);
+        if (v > MALLET_MAX_SPEED) { vx *= MALLET_MAX_SPEED / v; vy *= MALLET_MAX_SPEED / v; }
+        // Sweep from the old position to the new one, so a quick move can't
+        // skip over the puck and the hit uses the speed it was moving at.
+        const x0 = m.x, y0 = m.y, n = Math.max(1, Math.ceil(Math.hypot(x - x0, y - y0) / 4));
+        for (let i = 1; i <= n; i++) {
+          if (this.malletHit(x0 + ((x - x0) * i) / n, y0 + ((y - y0) * i) / n, vx, vy)) break;
+        }
+        Object.assign(m, { vx, vy, x, y, t: now });
+        h.dirty = true;
+        this.startHockey();
         break;
       }
 
@@ -583,6 +688,103 @@ export class Main extends Server<Env> {
     }
   }
 
+  startHockey() {
+    if (!this.hockeyTicker) this.hockeyTicker = setInterval(() => this.tickHockey(), HOCKEY_TICK_MS);
+  }
+
+  leaveHockey(id: string) {
+    const h = this.hockey;
+    for (const end of ["top", "bottom"] as End[]) {
+      if (h.ends[end] === id) { h.ends[end] = null; this.pushSnapshot(); }
+    }
+  }
+
+  tickHockey() {
+    const h = this.hockey, { play, cx, goalW, puckR: pr, malletR: mr } = HOCKEY;
+    const p = h.puck, now = Date.now();
+    const steps = 2, dt = HOCKEY_TICK_MS / 1000 / steps;
+    for (const end of ["top", "bottom"] as End[]) {
+      // a mallet we haven't heard about for a moment has stopped moving
+      if (now - h.mallets[end].t > 100) { h.mallets[end].vx = 0; h.mallets[end].vy = 0; }
+    }
+    let goal: End | null = null; // whose goal the puck went into
+    for (let i = 0; i < steps && !goal; i++) {
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      // side rails
+      if (p.x - pr < play.x) { p.x = play.x + pr; p.vx = Math.abs(p.vx) * PUCK_BOUNCE; }
+      if (p.x + pr > play.x + play.w) { p.x = play.x + play.w - pr; p.vx = -Math.abs(p.vx) * PUCK_BOUNCE; }
+      // end rails, with a goal mouth in the middle of each
+      const inMouth = Math.abs(p.x - cx) < goalW / 2 - pr * 0.3;
+      if (p.y - pr < play.y) {
+        if (!inMouth) { p.y = play.y + pr; p.vy = Math.abs(p.vy) * PUCK_BOUNCE; }
+        else if (p.y < play.y - pr) goal = "top";
+      }
+      if (p.y + pr > play.y + play.h) {
+        if (!inMouth) { p.y = play.y + play.h - pr; p.vy = -Math.abs(p.vy) * PUCK_BOUNCE; }
+        else if (p.y > play.y + play.h + pr) goal = "bottom";
+      }
+      // the puck running into a mallet
+      for (const end of ["top", "bottom"] as End[]) {
+        if (h.ends[end]) this.malletHit(h.mallets[end].x, h.mallets[end].y, h.mallets[end].vx, h.mallets[end].vy);
+      }
+    }
+    const keep = Math.pow(PUCK_FRICTION, HOCKEY_TICK_MS / 1000);
+    p.vx *= keep; p.vy *= keep;
+    const speed = Math.hypot(p.vx, p.vy);
+    if (speed > PUCK_MAX_SPEED) { p.vx *= PUCK_MAX_SPEED / speed; p.vy *= PUCK_MAX_SPEED / speed; }
+    if (speed < 3) { p.vx = 0; p.vy = 0; }
+    if (speed) h.dirty = true;
+
+    if (goal) this.hockeyGoal(goal);
+    if (h.dirty) {
+      h.dirty = false;
+      this.broadcast(JSON.stringify({ type: "hockey", ...this.hockeyState() }));
+    }
+    if (!h.ends.top && !h.ends.bottom && !p.vx && !p.vy) {
+      clearInterval(this.hockeyTicker!);
+      this.hockeyTicker = null;
+    }
+  }
+
+  // If a mallet at (x, y) moving at (vx, vy) touches the puck, knock the puck
+  // away (mallets act as immovable, adding their own speed). Returns whether
+  // it touched.
+  malletHit(x: number, y: number, vx: number, vy: number) {
+    const p = this.hockey.puck;
+    const c = contact(p.x, p.y, HOCKEY.puckR, { x, y, r: HOCKEY.malletR });
+    if (!c) return false;
+    p.x += c.nx * c.depth; p.y += c.ny * c.depth;
+    const vrel = (p.vx - vx) * c.nx + (p.vy - vy) * c.ny;
+    if (vrel < 0) { p.vx -= (1 + PUCK_BOUNCE) * vrel * c.nx; p.vy -= (1 + PUCK_BOUNCE) * vrel * c.ny; }
+    this.startHockey();
+    return true;
+  }
+
+  // The puck went into `into`'s goal. With two players, the other end scores
+  // and the puck goes to the player who conceded; with one player, it goes
+  // back to them wherever it went in.
+  hockeyGoal(into: End) {
+    const h = this.hockey, { play, cx } = HOCKEY;
+    const scorer: End = into === "top" ? "bottom" : "top";
+    const counted = !!(h.ends.top && h.ends.bottom);
+    if (counted) h.score[scorer]++;
+    const solo = h.ends.top ? "top" : h.ends.bottom ? "bottom" : null;
+    const serve: End = counted ? into : solo ?? into;
+    Object.assign(h.puck, { x: cx, y: serve === "top" ? play.y + play.h * 0.25 : play.y + play.h * 0.75, vx: 0, vy: 0 });
+    const by = h.ends[scorer] ? this.players[h.ends[scorer]!]?.name ?? null : null;
+    this.broadcast(JSON.stringify({ type: "goal", scorer, by, counted, score: h.score }));
+    h.dirty = true;
+  }
+
+  hockeyState() {
+    const h = this.hockey, r = (n: number) => Math.round(n * 10) / 10;
+    return {
+      ends: h.ends, score: h.score,
+      puck: [r(h.puck.x), r(h.puck.y)],
+      mallets: { top: [r(h.mallets.top.x), r(h.mallets.top.y)], bottom: [r(h.mallets.bottom.x), r(h.mallets.bottom.y)] },
+    };
+  }
+
   onClose(conn: Connection) {
     const player = this.players[conn.id];
     if (player) {
@@ -604,6 +806,7 @@ export class Main extends Server<Env> {
     }
     delete this.players[conn.id];
     delete this.lastMove[conn.id];
+    this.leaveHockey(conn.id);
     this.pushSnapshot();
   }
 
@@ -699,6 +902,7 @@ export class Main extends Server<Env> {
       world: WORLD, players: this.players, quills: this.quills, parchments: this.parchments,
       notes: this.notes, results: this.results,
       movers: this.movers.map(({ id, kind, x, y, a, r }) => ({ id, kind, x, y, a, r })),
+      hockey: this.hockeyState(),
     };
   }
 

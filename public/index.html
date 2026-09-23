@@ -107,6 +107,8 @@
         at (again to take it back)<br />
         <kbd>E</kbd> at the bell in the Lobby — show the results (and again to
         reopen voting)<br />
+        Air hockey in the Library: walk into an end of the table to take its
+        mallet; push it back off your end to stop<br />
         The number by each avatar is how many parchments they hold.
       </div>
     </div>
@@ -177,6 +179,17 @@
       let decor = [];      // fixed props: [{ kind, x, y, rot? }]
       let solids = [];     // collision shapes of solid props: [{ x, y, r } | { x, y, w, h, rot }]
       let movers = {};     // rollable props (pumpkins…), id -> { kind, x, y, a, r, rx, ry }
+
+      // Air hockey: table geometry from the map, live state from the server,
+      // and my own mallet (driven locally, reported to the server) when I'm playing.
+      let hockeyMap = null; // { table, play, cx, mid, goalW, puckR, malletR }
+      let hk = null;        // { ends: { top, bottom }, score, puck: [x, y], mallets: { top: [x, y], bottom: [x, y] } }
+      let myMallet = null;  // { x, y } while I hold an end
+      let malletPull = 0;   // seconds spent pushing my mallet against my own end — long enough and I leave
+      let lastMalletSent = 0, lastJoinTry = -1e9;
+      const hkDraw = { puck: null, top: null, bottom: null }; // eased drawn positions
+      const MALLET_SPEED = 1.8; // times walking speed
+      const LEAVE_PULL = 0.3;   // seconds of pushing off your end before you let go
       const PLAYER_R = 14; // avatar radius, used for wall collision
 
       // Floor tint, tiled floor texture and label colour per named room;
@@ -324,6 +337,7 @@
               walls = msg.map.walls || []; areas = msg.map.areas || [];
               desks = msg.map.desks || []; decor = msg.map.decor || [];
               solids = msg.map.solids || [];
+              hockeyMap = msg.map.hockey || null;
               bell = msg.map.bell || null;
               if (bell) loadSprite("bell");
               for (const d of decor) loadSprite(d.kind);
@@ -342,6 +356,16 @@
               until: performance.now() + 4000,
             };
             break;
+          case "hockey":
+            applyHockey(msg);
+            break;
+          case "goal": {
+            const names = hk ? [nameAt("top"), nameAt("bottom")] : ["", ""];
+            banner = msg.counted
+              ? { text: `🏒 ${msg.by || "Goal"} scores! ${names[0]} ${msg.score.top} – ${msg.score.bottom} ${names[1]}`, until: performance.now() + 3000 }
+              : { text: "🏒 Goal!", until: performance.now() + 1500 };
+            break;
+          }
           case "movers":
             for (const [id, x, y, a] of msg.m) {
               const m = movers[id];
@@ -370,6 +394,7 @@
         parchments = s.parchments;
         notes = s.notes || [];
         results = !!s.results;
+        if (s.hockey) applyHockey(s.hockey);
         const oldMovers = movers;
         movers = {};
         for (const m of s.movers || []) {
@@ -402,6 +427,75 @@
         document.getElementById("count").textContent = Object.keys(players).length;
         const me_ = players[myId];
         if (me_) document.getElementById("myParch").textContent = me_.parchments;
+      }
+
+      function myEnd() {
+        return !hk ? null : hk.ends.top === myId ? "top" : hk.ends.bottom === myId ? "bottom" : null;
+      }
+      function nameAt(end) {
+        const id = hk && hk.ends[end];
+        return (id && players[id] && players[id].name) || "";
+      }
+      function applyHockey(state) {
+        hk = state;
+        const end = myEnd();
+        if (!end) myMallet = null;
+        else if (!myMallet) { const [x, y] = hk.mallets[end]; myMallet = { x, y }; malletPull = 0; }
+      }
+      // Mirrors malletBounds() in the server: my own half of the surface.
+      function malletBounds(end) {
+        const { play, mid, malletR: r } = hockeyMap;
+        return {
+          x0: play.x + r, x1: play.x + play.w - r,
+          y0: end === "top" ? play.y + r : mid + r,
+          y1: end === "top" ? mid - r : play.y + play.h - r,
+        };
+      }
+
+      // While I hold an end, the movement keys drive my mallet. Pushing it
+      // against my own end for a moment lets go of the table.
+      function moveMallet(dx, dy) {
+        const end = myEnd(), b = malletBounds(end);
+        const len = Math.hypot(dx, dy) || 1, speed = frames * SPEED * MALLET_SPEED;
+        const x = Math.max(b.x0, Math.min(b.x1, myMallet.x + (dx / len) * speed));
+        const y = Math.max(b.y0, Math.min(b.y1, myMallet.y + (dy / len) * speed));
+        const pushingOff = end === "top" ? dy < 0 && y <= b.y0 : dy > 0 && y >= b.y1;
+        malletPull = pushingOff ? malletPull + frames / 60 : 0;
+        if (malletPull > LEAVE_PULL) {
+          send({ type: "hockeyLeave" });
+          myMallet = null;
+          hk.ends[end] = null; // don't wait for the server to stop steering
+          return;
+        }
+        if (x === myMallet.x && y === myMallet.y) return;
+        myMallet.x = x; myMallet.y = y;
+        const now = performance.now();
+        if (now - lastMalletSent > 16) { send({ type: "mallet", x, y }); lastMalletSent = now; }
+      }
+
+      // Walking into the middle of a free end of the table takes that end.
+      function tryJoinHockey(p, dy) {
+        if (!hockeyMap || !hk || myEnd()) return;
+        const { table, cx } = hockeyMap;
+        if (Math.abs(p.x - cx) > table.w / 2 - 10) return;
+        const end = dy > 0 && p.y < table.y && table.y - p.y <= PLAYER_R + 4 ? "top"
+                  : dy < 0 && p.y > table.y + table.h && p.y - (table.y + table.h) <= PLAYER_R + 4 ? "bottom"
+                  : null;
+        const now = performance.now();
+        if (!end || hk.ends[end] || now - lastJoinTry < 400) return;
+        lastJoinTry = now;
+        send({ type: "hockeyJoin", end });
+      }
+
+      // Which end of the table I'm standing at (and not playing), if any.
+      function hockeyEndNear() {
+        const p = me();
+        if (!p || !hockeyMap || myEnd()) return null;
+        const { table, cx } = hockeyMap;
+        for (const [end, y] of [["top", table.y], ["bottom", table.y + table.h]]) {
+          if (Math.hypot(p.x - cx, p.y - y) < 50) return end;
+        }
+        return null;
       }
 
       function renderSeals() {
@@ -579,7 +673,9 @@
           if (keys["s"] || keys["arrowdown"]) dy += 1;
           if (keys["a"] || keys["arrowleft"]) dx -= 1;
           if (keys["d"] || keys["arrowright"]) dx += 1;
-          if (dx || dy) {
+          if (myMallet) {
+            if (dx || dy) moveMallet(dx, dy); else malletPull = 0;
+          } else if (dx || dy) {
             const len = Math.hypot(dx, dy) || 1;
             // The more parchments you carry, the slightly slower you move —
             // so someone with fewer can always catch up and grab one.
@@ -587,6 +683,7 @@
             p.x = Math.max(0, Math.min(world.w, p.x + (dx / len) * speed));
             p.y = Math.max(0, Math.min(world.h, p.y + (dy / len) * speed));
             collideWalls(p); // push back out of any wall we walked into
+            tryJoinHockey(p, dy);
             if (p.carrying && quills[p.carrying]) {
               quills[p.carrying].x = p.x;
               quills[p.carrying].y = p.y - 24;
@@ -615,6 +712,11 @@
           else { q.rx += dx * ease(0.25); q.ry += dy * ease(0.25); }
         }
         for (const id in players) animate(players[id]);
+        // players at the air hockey table face it
+        for (const end of ["top", "bottom"]) {
+          const p = hk && players[hk.ends[end]];
+          if (p && p.anim) p.anim.dir = end === "top" ? "down" : "up";
+        }
 
         draw();
         requestAnimationFrame(step);
@@ -638,6 +740,7 @@
         drawLabels();
         drawNotes();
         drawMovers();
+        drawHockey();
         drawGround();
         drawPlayers();
         drawGhost();
@@ -772,6 +875,56 @@
           const m = movers[id];
           m.rx += (m.x - m.rx) * ease(0.35); m.ry += (m.y - m.ry) * ease(0.35);
           drawSprite(m.kind, m.rx, m.ry, m.a);
+        }
+      }
+
+      function drawHockey() {
+        if (!hockeyMap || !hk) return;
+        const { play, cx, puckR, malletR } = hockeyMap;
+        const glide = (key, x, y, k) => {
+          const d = (hkDraw[key] ??= { x, y });
+          d.x += (x - d.x) * ease(k); d.y += (y - d.y) * ease(k);
+          return d;
+        };
+        // score, big and faint on each half, once there are two players
+        if (hk.ends.top && hk.ends.bottom) {
+          ctx.save();
+          ctx.fillStyle = "rgba(46,90,138,0.28)";
+          ctx.font = "800 44px system-ui, sans-serif";
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText(String(hk.score.top), cx, play.y + play.h * 0.25);
+          ctx.fillText(String(hk.score.bottom), cx, play.y + play.h * 0.75);
+          ctx.restore();
+        }
+        // puck
+        const pk = glide("puck", hk.puck[0], hk.puck[1], 0.6);
+        ctx.fillStyle = "rgba(0,0,0,0.25)";
+        ctx.beginPath(); ctx.arc(pk.x + 1.5, pk.y + 2, puckR, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#1c1c22";
+        ctx.beginPath(); ctx.arc(pk.x, pk.y, puckR, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#50505c"; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(pk.x, pk.y, puckR - 3, 0, Math.PI * 2); ctx.stroke();
+        // mallets, in their player's colour; mine is drawn where I've put it
+        for (const end of ["top", "bottom"]) {
+          const id = hk.ends[end];
+          if (!id) { hkDraw[end] = null; continue; }
+          let m;
+          if (id === myId && myMallet) {
+            // nudge it over the rail while I'm pushing off, as a hint that I'm leaving
+            const off = (malletPull / LEAVE_PULL) * malletR * (end === "top" ? -1 : 1);
+            m = { x: myMallet.x, y: myMallet.y + off };
+          } else {
+            m = glide(end, hk.mallets[end][0], hk.mallets[end][1], 0.5);
+          }
+          const color = (players[id] && players[id].color) || "#ccc";
+          ctx.fillStyle = "rgba(0,0,0,0.3)";
+          ctx.beginPath(); ctx.arc(m.x + 2, m.y + 3, malletR, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = color;
+          ctx.beginPath(); ctx.arc(m.x, m.y, malletR, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = shade(color, -0.3);
+          ctx.beginPath(); ctx.arc(m.x, m.y, malletR * 0.55, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = shade(color, 0.25);
+          ctx.beginPath(); ctx.arc(m.x - 1.5, m.y - 2, malletR * 0.35, 0, Math.PI * 2); ctx.fill();
         }
       }
 
@@ -924,7 +1077,13 @@
         const p = me();
         if (!p) return;
         let text = null;
-        if (nearBell()) {
+        const tableEnd = hockeyEndNear();
+        if (myMallet) {
+          text = "Move to steer your mallet · push back off your end to stop playing";
+        } else if (tableEnd) {
+          text = hk && hk.ends[tableEnd] ? "Someone's playing at this end"
+               : "Walk into the end of the table to play air hockey";
+        } else if (nearBell()) {
           text = results ? "E — ring the bell to reopen voting" : "E — ring the bell to show the results";
         } else if (p.note) {
           const a = namedAreaAt(p);
@@ -1196,9 +1355,12 @@
           ctx.fillStyle = "#e6e9ef";
           ctx.font = "600 13px system-ui, sans-serif";
           ctx.textAlign = "center";
-          ctx.fillText(p.name || "Guest", x, y - 32);
+          // at the air hockey table, keep labels off the table: the name goes on
+          // the far side from it and the parchment badge is hidden
+          const atBottomEnd = hk && hk.ends.bottom === id;
+          ctx.fillText(p.name || "Guest", x, atBottomEnd ? y + 40 : y - 32);
           // parchment count badge just below the figure
-          drawParchmentBadge(x, y + 36, p.parchments || 0);
+          if (!(hk && (hk.ends.top === id || atBottomEnd))) drawParchmentBadge(x, y + 36, p.parchments || 0);
           ctx.textAlign = "left";
         }
       }

@@ -31,6 +31,10 @@ URL (e.g. `http://127.0.0.1:8787/#sprint-42`) to create separate rooms.
   holds more than you
 - **Q** — drop your quill
 - Walk into a pumpkin or barrel to send it rolling
+- **Air hockey** in the Library: walk into an end of the table to take its
+  mallet, steer it with your movement keys, and push it back off your end to
+  stop. With two players a score is kept (reset when the second player joins).
+  After a goal the puck goes to whoever conceded — or, playing alone, back to you.
 - **R** — write a note (at a desk in the Scriptorium, holding a quill and a
   blank parchment)
 - **F** — pin the note you're carrying in the room you're standing in

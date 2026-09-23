@@ -174,7 +174,9 @@
       let walls = [];      // solid rectangles: [{ x, y, w, h }]
       let areas = [];      // floors: [{ name?, prompt?, x, y, w, h }]
       let desks = [];      // Scriptorium writing desks: [{ x, y, w, h }]
-      let decor = [];      // cosmetic props: [{ kind, x, y, rot? }]
+      let decor = [];      // fixed props: [{ kind, x, y, rot? }]
+      let solids = [];     // collision shapes of solid props: [{ x, y, r } | { x, y, w, h, rot }]
+      let movers = {};     // rollable props (pumpkins…), id -> { kind, x, y, a, r, rx, ry }
       const PLAYER_R = 14; // avatar radius, used for wall collision
 
       // Floor tint, tiled floor texture and label colour per named room;
@@ -321,6 +323,7 @@
             if (msg.map) {
               walls = msg.map.walls || []; areas = msg.map.areas || [];
               desks = msg.map.desks || []; decor = msg.map.decor || [];
+              solids = msg.map.solids || [];
               bell = msg.map.bell || null;
               if (bell) loadSprite("bell");
               for (const d of decor) loadSprite(d.kind);
@@ -338,6 +341,12 @@
                                 : `🔔 ${msg.by} rang the bell — voting is open again`,
               until: performance.now() + 4000,
             };
+            break;
+          case "movers":
+            for (const [id, x, y, a] of msg.m) {
+              const m = movers[id];
+              if (m) { m.x = x; m.y = y; m.a = a; }
+            }
             break;
           case "ballot":
             myBallot = msg.notes || [];
@@ -361,6 +370,13 @@
         parchments = s.parchments;
         notes = s.notes || [];
         results = !!s.results;
+        const oldMovers = movers;
+        movers = {};
+        for (const m of s.movers || []) {
+          const old = oldMovers[m.id];
+          movers[m.id] = { ...m, rx: old ? old.rx : m.x, ry: old ? old.ry : m.y };
+          loadSprite(m.kind);
+        }
 
         const merged = {};
         for (const id in s.players) {
@@ -469,10 +485,48 @@
         return best ? { ...best, kind } : null;
       }
 
-      // Resolve the player circle (radius PLAYER_R) out of any solid wall.
-      // Two passes so we settle cleanly in inside corners.
+      // If a circle overlaps shape s, the unit normal to push it out along and
+      // how far. Mirrors contact() in the server.
+      function contact(cx, cy, r, s) {
+        if (s.r !== undefined) {
+          const dx = cx - s.x, dy = cy - s.y, d = Math.hypot(dx, dy);
+          if (d >= r + s.r) return null;
+          return d ? { nx: dx / d, ny: dy / d, depth: r + s.r - d } : { nx: 1, ny: 0, depth: r + s.r };
+        }
+        const t = ((s.rot || 0) * Math.PI) / 180, cos = Math.cos(t), sin = Math.sin(t);
+        const lx = (cx - s.x) * cos + (cy - s.y) * sin, ly = -(cx - s.x) * sin + (cy - s.y) * cos;
+        const hw = s.w / 2, hh = s.h / 2;
+        let nlx, nly, depth;
+        if (Math.abs(lx) < hw && Math.abs(ly) < hh) {
+          const ox = hw - Math.abs(lx), oy = hh - Math.abs(ly);
+          if (ox < oy) { nlx = Math.sign(lx) || 1; nly = 0; depth = ox + r; }
+          else { nlx = 0; nly = Math.sign(ly) || 1; depth = oy + r; }
+        } else {
+          const qx = Math.max(-hw, Math.min(hw, lx)), qy = Math.max(-hh, Math.min(hh, ly));
+          const d = Math.hypot(lx - qx, ly - qy);
+          if (d >= r) return null;
+          nlx = (lx - qx) / d; nly = (ly - qy) / d; depth = r - d;
+        }
+        return { nx: nlx * cos - nly * sin, ny: nlx * sin + nly * cos, depth };
+      }
+
+      // Rollable props block you too, but a few pixels "soft", so walking into
+      // one overlaps it slightly — which is what tells the server to nudge it.
+      const MOVER_GIVE = 4;
+
+      // Resolve the player circle (radius PLAYER_R) out of any solid wall, prop
+      // or rollable prop. Two passes so we settle cleanly in inside corners.
       function collideWalls(p) {
         for (let pass = 0; pass < 2; pass++) {
+          for (const s of solids) {
+            const c = contact(p.x, p.y, PLAYER_R, s);
+            if (c) { p.x += c.nx * c.depth; p.y += c.ny * c.depth; }
+          }
+          for (const id in movers) {
+            const m = movers[id];
+            const c = contact(p.x, p.y, PLAYER_R, { x: m.x, y: m.y, r: m.r - MOVER_GIVE });
+            if (c) { p.x += c.nx * c.depth; p.y += c.ny * c.depth; }
+          }
           for (const w of walls) {
             const insideX = p.x > w.x && p.x < w.x + w.w;
             const insideY = p.y > w.y && p.y < w.y + w.h;
@@ -503,11 +557,21 @@
       }
 
       // ---- Movement + send throttle ------------------------------------
+      // Everything that moves is tuned in "per 60fps frame" units and scaled by
+      // how long the frame actually took, so speed doesn't depend on the display's
+      // refresh rate (120Hz Chrome would otherwise run twice as fast as Safari).
+      let lastFrame = 0;
+      let frames = 1; // this frame's length, in 60fps frames
+      // Per-frame easing factor k, corrected for the frame's length.
+      function ease(k) { return 1 - Math.pow(1 - k, frames); }
+
       const SPEED = 3.6;
       const PARCH_SLOWDOWN = 0.02;   // -2% speed per parchment carried
       const MIN_SPEED_FACTOR = 0.6;  // never slower than 60% of base speed
       let lastSent = 0;
-      function step() {
+      function step(now) {
+        frames = lastFrame ? Math.min(100, now - lastFrame) / (1000 / 60) : 1;
+        lastFrame = now;
         const p = me();
         if (p) {
           let dx = 0, dy = 0;
@@ -519,7 +583,7 @@
             const len = Math.hypot(dx, dy) || 1;
             // The more parchments you carry, the slightly slower you move —
             // so someone with fewer can always catch up and grab one.
-            const speed = SPEED * Math.max(MIN_SPEED_FACTOR, 1 - PARCH_SLOWDOWN * (p.parchments || 0));
+            const speed = frames * SPEED * Math.max(MIN_SPEED_FACTOR, 1 - PARCH_SLOWDOWN * (p.parchments || 0));
             p.x = Math.max(0, Math.min(world.w, p.x + (dx / len) * speed));
             p.y = Math.max(0, Math.min(world.h, p.y + (dy / len) * speed));
             collideWalls(p); // push back out of any wall we walked into
@@ -535,8 +599,8 @@
           }
           const targetX = p.x - innerWidth / 2;
           const targetY = p.y - innerHeight / 2;
-          cam.x += (targetX - cam.x) * 0.12;
-          cam.y += (targetY - cam.y) * 0.12;
+          cam.x += (targetX - cam.x) * ease(0.12);
+          cam.y += (targetY - cam.y) * ease(0.12);
           cam.x = Math.max(-100, Math.min(world.w - innerWidth + 100, cam.x));
           cam.y = Math.max(-100, Math.min(world.h - innerHeight + 100, cam.y));
         }
@@ -548,7 +612,7 @@
           if (id === myId) { q.rx = q.x; q.ry = q.y; continue; }
           const dx = q.x - q.rx, dy = q.y - q.ry;
           if (Math.hypot(dx, dy) > 240) { q.rx = q.x; q.ry = q.y; }
-          else { q.rx += dx * 0.25; q.ry += dy * 0.25; }
+          else { q.rx += dx * ease(0.25); q.ry += dy * ease(0.25); }
         }
         for (const id in players) animate(players[id]);
 
@@ -573,6 +637,7 @@
         drawGlows();
         drawLabels();
         drawNotes();
+        drawMovers();
         drawGround();
         drawPlayers();
         drawGhost();
@@ -701,6 +766,15 @@
           }
       }
 
+      // Rollable props glide toward their latest server position.
+      function drawMovers() {
+        for (const id in movers) {
+          const m = movers[id];
+          m.rx += (m.x - m.rx) * ease(0.35); m.ry += (m.y - m.ry) * ease(0.35);
+          drawSprite(m.kind, m.rx, m.ry, m.a);
+        }
+      }
+
       // The resident ghost drifts around the Lobby. Its path is a function of
       // the wall clock, so everyone sees it in roughly the same place.
       function drawGhost() {
@@ -806,7 +880,7 @@
         for (const n of notes) {
           const t = noteTarget(n);
           const d = (noteDraw[n.id] ??= { x: t.x, y: t.y });
-          d.x += (t.x - d.x) * 0.08; d.y += (t.y - d.y) * 0.08;
+          d.x += (t.x - d.x) * ease(0.08); d.y += (t.y - d.y) * ease(0.08);
           // cards with no votes fade back while results are showing
           ctx.globalAlpha = results && !n.votes ? 0.6 : 1;
           drawNoteCard(n, d.x, d.y, n.scale ?? 1, false);
@@ -988,15 +1062,15 @@
         a.px = x; a.py = y;
         const d = Math.hypot(dx, dy);
         if (d > 60) return; // a jump (reconnect/teleport), not a step
-        // smooth the speed so network-driven movement doesn't stutter
-        a.speed += (d - a.speed) * 0.3;
-        if (d > 0.4) {
+        // speed in px per 60fps frame, smoothed so network-driven movement doesn't stutter
+        a.speed += (d / frames - a.speed) * ease(0.3);
+        if (d / frames > 0.4) {
           // pick the dominant axis, with some stickiness on diagonals
           const horiz = a.dir === "left" || a.dir === "right";
           const useX = horiz ? Math.abs(dx) * 1.3 > Math.abs(dy) : Math.abs(dx) > Math.abs(dy) * 1.3;
           a.dir = useX ? (dx < 0 ? "left" : "right") : (dy < 0 ? "up" : "down");
         }
-        if (a.speed > 0.3) a.phase += a.speed * 0.22;
+        if (a.speed > 0.3) a.phase += a.speed * frames * 0.22;
         else a.phase = 0;
       }
 

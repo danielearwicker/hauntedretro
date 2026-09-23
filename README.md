@@ -30,6 +30,7 @@ URL (e.g. `http://127.0.0.1:8787/#sprint-42`) to create separate rooms.
 - **E** — grab the nearest quill, parchment, or one parchment from a player who
   holds more than you
 - **Q** — drop your quill
+- Walk into a pumpkin or barrel to send it rolling
 - **R** — write a note (at a desk in the Scriptorium, holding a quill and a
   blank parchment)
 - **F** — pin the note you're carrying in the room you're standing in
@@ -74,7 +75,7 @@ every board, or just use a new `#roomname`.
 |------|------|
 | `src/index.ts`     | The Worker. `Main` is a Durable Object (one per room) holding authoritative game state; the fetch handler routes `/parties/main/<room>` WebSocket upgrades to it. Also defines the map (rooms/corridors → generated walls). |
 | `public/index.html`| The whole client: a `<canvas>` renderer with a follow-camera, interpolation of other players, wall collision, and a WebSocket into the room. No build step. |
-| `public/decor/`    | SVG sprites: tiling floors (`floor-*.svg`) and room props. Each is drawn at its own `width`/`height` in world pixels; where props go is `DECOR` in `src/index.ts`, and which floor each room uses is `ROOM_STYLE` in the client. |
+| `public/decor/`    | SVG sprites: tiling floors (`floor-*.svg`) and room props. Each is drawn at its own `width`/`height` in world pixels; where props go is `DECOR` in `src/index.ts`, and which floor each room uses is `ROOM_STYLE` in the client. Solid props get a footprint in `COLLIDERS`; kinds in `MOVER_KINDS` (pumpkins, barrels) roll away when walked into, with physics run by the server. |
 | `wrangler.jsonc`   | Cloudflare config: Durable Object binding, SQLite migration, and `./public` served as static assets. |
 
 ## Deploy to Cloudflare

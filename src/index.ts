@@ -1,4 +1,10 @@
-import { routePartykitRequest, Server, type Connection } from "partyserver";
+import { routePartykitRequest, Server, type Connection, type ConnectionContext } from "partyserver";
+
+// How long a player whose connection dropped is kept for their tab to come back.
+const RESUME_GRACE_MS = 5 * 60 * 1000;
+// Close code for a socket whose tab has reconnected on a new one; the client
+// doesn't try to reconnect after it.
+const REPLACED_CODE = 4000;
 
 /**
  * Cloudflare Worker + Durable Object version of the retro game.
@@ -381,6 +387,8 @@ export class Main extends Server<Env> {
     dirty: false, // something changed since the last broadcast
   };
   hockeyTicker: ReturnType<typeof setInterval> | null = null;
+  // players whose connection dropped, by voter id, waiting to be resumed
+  parked: Record<string, { player: Player; timer: ReturnType<typeof setTimeout> }> = {};
   nextId = 1;
 
   async onStart() {
@@ -409,23 +417,32 @@ export class Main extends Server<Env> {
     this.ctx.storage.put("board", board);
   }
 
-  onConnect(conn: Connection) {
-    const color = PLAYER_COLORS[Object.keys(this.players).length % PLAYER_COLORS.length];
-    this.players[conn.id] = {
-      id: conn.id,
-      name: "Guest",
-      color,
-      x: 1600 + (Math.random() * 200 - 100),
-      y: 1320 + (Math.random() * 200 - 100),
-      carrying: null,
-      parchments: 0,
-      note: null,
-      voter: null,
-    };
+  async onConnect(conn: Connection, ctx: ConnectionContext) {
+    // The client's per-tab id, so a tab that comes back (a phone returning
+    // from another app, a dropped connection) gets its old player back.
+    const voter = (new URL(ctx.request.url).searchParams.get("voter") ?? "").slice(0, 64) || null;
+    const resumed = await this.resume(conn, voter);
+    if (!resumed) {
+      const color = PLAYER_COLORS[Object.keys(this.players).length % PLAYER_COLORS.length];
+      this.players[conn.id] = {
+        id: conn.id,
+        name: "Guest",
+        color,
+        x: 1600 + (Math.random() * 200 - 100),
+        y: 1320 + (Math.random() * 200 - 100),
+        carrying: null,
+        parchments: 0,
+        note: null,
+        voter,
+      };
+    }
 
-    // Supply scales with the group.
-    this.quills.push({ id: this.mkId("quill"), ...this.spawnPos(), heldBy: null });
-    for (let i = 0; i < 3; i++) this.parchments.push({ id: this.mkId("parch"), ...this.spawnPos() });
+    // Supply scales with the group. A player picked up from memory already
+    // brought theirs; one restored from storage finds a world rebuilt without it.
+    if (resumed !== "memory") {
+      if (!this.players[conn.id].carrying) this.quills.push({ id: this.mkId("quill"), ...this.spawnPos(), heldBy: null });
+      for (let i = 0; i < 3; i++) this.parchments.push({ id: this.mkId("parch"), ...this.spawnPos() });
+    }
 
     // Map (static geometry) sent only on init; snapshots don't resend it.
     conn.send(JSON.stringify({
@@ -453,7 +470,7 @@ export class Main extends Server<Env> {
 
     switch (msg.type) {
       case "hello": {
-        player.voter = String(msg.voter ?? "").slice(0, 64) || null;
+        player.voter ??= String(msg.voter ?? "").slice(0, 64) || null;
         this.sendBallot(sender, player);
         break;
       }
@@ -807,27 +824,81 @@ export class Main extends Server<Env> {
 
   onClose(conn: Connection) {
     const player = this.players[conn.id];
-    if (player) {
-      // An unpinned note goes back to being a blank parchment.
-      const blanks = player.parchments + (player.note ? 1 : 0);
-      for (let i = 0; i < blanks; i++) {
-        this.parchments.push({
-          id: this.mkId("parch"),
-          x: clamp(player.x + (Math.random() * 44 - 22), 20, WORLD.w - 20),
-          y: clamp(player.y + (Math.random() * 44 - 22), 20, WORLD.h - 20),
-        });
-      }
-      if (player.carrying) {
-        this.quills = this.quills.filter((q) => q.id !== player.carrying);
-      } else {
-        const idx = this.quills.findIndex((q) => !q.heldBy);
-        if (idx >= 0) this.quills.splice(idx, 1);
-      }
-    }
     delete this.players[conn.id];
     delete this.lastMove[conn.id];
     this.leaveHockey(conn.id);
+    if (player?.voter) this.park(player);
+    else if (player) this.dropBelongings(player);
     this.pushSnapshot();
+  }
+
+  // A player whose connection dropped is kept out of sight, belongings and
+  // all, for RESUME_GRACE_MS in case their tab comes back. They're saved to
+  // storage too, as the room may shut down meanwhile if they were alone.
+  park(player: Player) {
+    const voter = player.voter!;
+    clearTimeout(this.parked[voter]?.timer);
+    const timer = setTimeout(() => {
+      delete this.parked[voter];
+      this.ctx.storage.delete(`parked:${voter}`);
+      this.dropBelongings(player);
+      this.pushSnapshot();
+    }, RESUME_GRACE_MS);
+    this.parked[voter] = { player, timer };
+    this.ctx.storage.put(`parked:${voter}`, { player, at: Date.now() });
+  }
+
+  // Give conn the player last seen with this voter id, if there is one: parked
+  // in memory, parked in storage from before the room last shut down, or
+  // still connected on a socket the tab has since abandoned. Says where it
+  // came from, or false for none.
+  async resume(conn: Connection, voter: string | null): Promise<"memory" | "storage" | false> {
+    if (!voter) return false;
+    let old: Player | undefined, from: "memory" | "storage" = "memory";
+    const parked = this.parked[voter];
+    if (parked) {
+      clearTimeout(parked.timer);
+      delete this.parked[voter];
+      old = parked.player;
+    } else if ((old = Object.values(this.players).find((p) => p.voter === voter))) {
+      // take it off the old socket first, so closing that socket doesn't park it
+      delete this.players[old.id];
+      delete this.lastMove[old.id];
+      this.leaveHockey(old.id);
+      this.getConnection(old.id)?.close(REPLACED_CODE, "Opened again elsewhere");
+    } else {
+      const saved = await this.ctx.storage.get<{ player: Player; at: number }>(`parked:${voter}`);
+      if (saved && Date.now() - saved.at < RESUME_GRACE_MS) { old = saved.player; from = "storage"; }
+    }
+    this.ctx.storage.delete(`parked:${voter}`);
+    if (!old) return false;
+    for (const q of this.quills) if (q.heldBy === old.id) q.heldBy = conn.id;
+    if (old.carrying && !this.quills.some((q) => q.id === old!.carrying)) {
+      // the room restarted since: the quill they were holding went with it
+      this.quills.push({ id: old.carrying, x: old.x, y: old.y - 24, heldBy: conn.id });
+      this.nextId = Math.max(this.nextId, Number(old.carrying.replace(/\D/g, "")) + 1); // don't hand its id out again
+    }
+    this.players[conn.id] = { ...old, id: conn.id };
+    return from;
+  }
+
+  // What a departing player had goes back into the world.
+  dropBelongings(player: Player) {
+    // An unpinned note goes back to being a blank parchment.
+    const blanks = player.parchments + (player.note ? 1 : 0);
+    for (let i = 0; i < blanks; i++) {
+      this.parchments.push({
+        id: this.mkId("parch"),
+        x: clamp(player.x + (Math.random() * 44 - 22), 20, WORLD.w - 20),
+        y: clamp(player.y + (Math.random() * 44 - 22), 20, WORLD.h - 20),
+      });
+    }
+    if (player.carrying) {
+      this.quills = this.quills.filter((q) => q.id !== player.carrying);
+    } else {
+      const idx = this.quills.findIndex((q) => !q.heldBy);
+      if (idx >= 0) this.quills.splice(idx, 1);
+    }
   }
 
   // Put a note in the free slot nearest to `at`, making room first if needed.
@@ -918,8 +989,10 @@ export class Main extends Server<Env> {
   }
 
   snapshot() {
+    // voter ids stay private: knowing one would let you take over that player
+    const players = Object.fromEntries(Object.entries(this.players).map(([id, { voter, ...p }]) => [id, p]));
     return {
-      world: WORLD, players: this.players, quills: this.quills, parchments: this.parchments,
+      world: WORLD, players, quills: this.quills, parchments: this.parchments,
       notes: this.notes, results: this.results,
       movers: this.movers.map(({ id, kind, x, y, a, r }) => ({ id, kind, x, y, a, r })),
       hockey: this.hockeyState(),

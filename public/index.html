@@ -225,8 +225,9 @@
       const NOTE_W = 170, NOTE_H = 120; // must match the server
       const NOTE_REACH = 20;            // must match the server
 
-      // A per-tab voter id: survives a refresh (so you keep your ballot) but
-      // a new tab is a new voter, which keeps multi-tab testing working.
+      // A per-tab voter id: survives a refresh (so you keep your ballot, and
+      // your player if you come back within a few minutes) but a new tab is
+      // a new voter, which keeps multi-tab testing working.
       const VOTER = (() => {
         const fresh = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
         try {
@@ -511,9 +512,12 @@
       writer.addEventListener("click", (e) => { if (e.target === writer) closeWriter(); });
 
       // ---- WebSocket wiring --------------------------------------------
-      let socket;
+      let socket, reconnectTimer = null;
+      const REPLACED_CODE = 4000; // must match the server
       function connect() {
-        socket = new WebSocket(WS_URL);
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        socket = new WebSocket(`${WS_URL}?voter=${encodeURIComponent(VOTER)}`);
         socket.addEventListener("open", () => {
           setStatus(true, "connected");
           send({ type: "hello", voter: VOTER });
@@ -527,12 +531,24 @@
             history.replaceState(null, "", url);
           }
         });
-        socket.addEventListener("close", () => {
+        const mine = socket;
+        mine.addEventListener("close", (e) => {
+          if (mine !== socket) return; // an old socket we've already replaced
+          if (e.code === REPLACED_CODE) {
+            // this tab's player moved to a newer connection (a copy of this tab)
+            setStatus(false, "open in another tab — refresh to play here");
+            return;
+          }
           setStatus(false, "reconnecting…");
-          setTimeout(connect, 1000);
+          reconnectTimer = setTimeout(connect, 1000);
         });
-        socket.addEventListener("message", (ev) => handle(JSON.parse(ev.data)));
+        mine.addEventListener("message", (ev) => { if (mine === socket) handle(JSON.parse(ev.data)); });
       }
+      // Coming back to the page (a phone returning from another app): if the
+      // connection died meanwhile, get back in now rather than on the timer.
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible" && socket.readyState >= WebSocket.CLOSING) connect();
+      });
       function send(obj) {
         if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(obj));
       }
@@ -639,6 +655,8 @@
         document.getElementById("count").textContent = Object.keys(players).length;
         const me_ = players[myId];
         if (me_) document.getElementById("myParch").textContent = me_.parchments;
+        // a player picked up again after a reload brings their name with them
+        if (me_ && me_.name !== "Guest" && !nameInput.value && document.activeElement !== nameInput) nameInput.value = me_.name;
       }
 
       function myEnd() {

@@ -76,6 +76,13 @@ was pinned.
 Notes are anonymous. An unpinned note turns back into a blank parchment if
 its carrier leaves.
 
+If your connection drops — a phone switching to another app, a refresh, a
+flaky network — you get the same player back, where you were and with
+whatever you were holding, as long as you return within 5 minutes in the same
+tab. Only after that do your parchments and note go back on the floor. (A
+duplicated tab counts as the same tab: opening one takes the player over, and
+the original says so.)
+
 Each room's board of pinned notes is saved in its Durable Object's storage, so
 it survives everyone leaving, redeploys and (under `wrangler dev`) code
 reloads. Locally that storage lives in `.wrangler/state`; delete it to wipe

@@ -81,6 +81,14 @@ it survives everyone leaving, redeploys and (under `wrangler dev`) code
 reloads. Locally that storage lives in `.wrangler/state`; delete it to wipe
 every board, or just use a new `#roomname`.
 
+To clear one room's board — locally or deployed — open it with `?reset=1`,
+e.g. `https://…/?reset=1#sprint-42` (or `…/#sprint-42?reset=1`, or just
+`…/?reset=1` for the default room). Its notes, seals and results are deleted
+and the rolling props go back to their places; anyone in the room stays, along
+with any note they're carrying. The parameter is dropped from the address
+straight away, so refreshing won't clear it again. There's no in-game button
+for it, but anyone who knows the trick can use it.
+
 ## How it fits together
 
 | File | Role |

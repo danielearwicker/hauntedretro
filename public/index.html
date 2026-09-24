@@ -209,7 +209,12 @@
 
     <script>
       // ---- Connection ---------------------------------------------------
-      const ROOM = (location.hash.replace("#", "") || "retro").slice(0, 40);
+      // #room, optionally with ?reset=1 after it (…/#sprint-42?reset=1) as
+      // well as before it (…/?reset=1#sprint-42).
+      const [hashRoom, hashQuery = ""] = location.hash.replace("#", "").split("?");
+      const ROOM = (hashRoom || "retro").slice(0, 40);
+      // Hidden: ?reset=1 wipes this room's board once, on the first connect.
+      let resetRequested = [location.search, "?" + hashQuery].some((q) => new URLSearchParams(q).get("reset") === "1");
       document.getElementById("roomName").textContent = ROOM;
 
       const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -512,6 +517,15 @@
         socket.addEventListener("open", () => {
           setStatus(true, "connected");
           send({ type: "hello", voter: VOTER });
+          if (resetRequested) {
+            send({ type: "reset" });
+            resetRequested = false;
+            // drop it from the address so a refresh doesn't wipe the board again
+            const url = new URL(location.href);
+            url.searchParams.delete("reset");
+            url.hash = hashRoom ? "#" + hashRoom : "";
+            history.replaceState(null, "", url);
+          }
         });
         socket.addEventListener("close", () => {
           setStatus(false, "reconnecting…");
@@ -549,6 +563,10 @@
                                 : `🔔 ${msg.by} rang the bell — voting is open again`,
               until: performance.now() + 4000,
             };
+            break;
+          case "reset":
+            for (const id in noteDraw) delete noteDraw[id];
+            banner = { text: `🧹 ${msg.by} cleared the board`, until: performance.now() + 4000 };
             break;
           case "hockey":
             applyHockey(msg);

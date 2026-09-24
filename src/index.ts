@@ -35,6 +35,7 @@ import { routePartykitRequest, Server, type Connection } from "partyserver";
  * every change and reloaded in onStart, so a retro survives the room going
  * idle, redeploys and — under `wrangler dev` — code reloads. Players, quills
  * and loose parchments are not saved; they come and go with connections.
+ * Opening the page with ?reset=1 sends a "reset" that wipes the board.
  */
 
 type Player = {
@@ -478,6 +479,25 @@ export class Main extends Server<Env> {
         this.layoutResults();
         this.saveBoard();
         this.broadcast(JSON.stringify({ type: "bell", by: player.name, results: this.results }));
+        this.pushSnapshot();
+        break;
+      }
+
+      case "reset": {
+        // Wipe the saved board: notes, seals, results, props back where they
+        // started. Players (and any notes they're still carrying) stay. There's
+        // no in-game control for this; the client sends it for ?reset=1.
+        this.notes = [];
+        this.roomScale = {};
+        this.ballots = {};
+        this.results = false;
+        this.movers = initialMovers();
+        this.ctx.storage.delete("board");
+        for (const conn of this.getConnections()) {
+          const p = this.players[conn.id];
+          if (p) this.sendBallot(conn, p);
+        }
+        this.broadcast(JSON.stringify({ type: "reset", by: player.name }));
         this.pushSnapshot();
         break;
       }

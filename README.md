@@ -42,6 +42,14 @@ URL (e.g. `http://127.0.0.1:8787/#sprint-42`) to create separate rooms.
   take it back
 - **E** at the bell in the Lobby — show the results; ring again to reopen voting
 
+On phones and tablets the game switches to touch controls: put your thumb
+anywhere in the lower left and slide to walk (further for faster), and tap the
+button on the right for whatever you can do where you're standing. The
+instructions fold away behind the **?** in the corner. Whichever you use last
+wins — touch the screen for touch controls, press a game key for the keyboard.
+Add `?controls=touch` or `?controls=keys` to the URL to force either (handy for
+trying touch mode in a desktop browser, where the stick works with the mouse).
+
 ## The retro
 
 The Scriptorium is where the writing desks and ink are kept, so it's the only

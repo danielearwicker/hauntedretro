@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <title>Haunted Retro</title>
     <style>
       :root { color-scheme: dark; }
@@ -79,13 +79,73 @@
         background: #3a2f1e; color: #f4ecd4; border: 0; border-radius: 6px;
         padding: 6px 14px; font-size: 13px; cursor: pointer;
       }
+      #writer button.secondary { background: transparent; color: #3a2f1e; border: 1px solid #a8956a; }
+
+      /* ---- Touch mode: a thumb stick, context buttons, a compact HUD ---- */
+      #helpBtn, .hint.touch-hint, #touchControls { display: none; }
+      body.touch { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+      body.touch .hud {
+        top: max(8px, env(safe-area-inset-top)); left: max(8px, env(safe-area-inset-left));
+        max-width: calc(100vw - 16px); padding: 8px 10px; border-radius: 10px;
+      }
+      body.touch .hud h1 { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+      body.touch .hud .row { flex-wrap: wrap; gap: 4px 6px; margin: 4px 0; }
+      body.touch .hud input { font-size: 16px; padding: 4px 8px; } /* 16px stops iOS zooming in on focus */
+      body.touch .pill { font-size: 11px; }
+      body.touch #helpBtn {
+        display: inline-block; width: 26px; height: 26px; border-radius: 50%;
+        background: #232936; color: #e6e9ef; border: 1px solid rgba(255, 255, 255, 0.14);
+        font: 700 14px system-ui, sans-serif; padding: 0;
+      }
+      body.touch .hint.keys { display: none; }
+      body.touch .hud.help .hint.touch-hint { display: block; }
+      body.touch #status { bottom: auto; left: auto; top: max(12px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right)); }
+      body.touch #status #statusText { display: none; }
+      body.touch #writer { align-items: flex-start; padding-top: 8vh; }
+      body.touch #writer textarea { font-size: 16px; }
+      body.touch #writer .keyhint { display: none; }
+      body.touch #touchControls { display: block; }
+
+      /* Touch anywhere in the lower-left to put the stick under your thumb */
+      #stickZone {
+        position: fixed; left: 0; bottom: 0; z-index: 15;
+        width: 55vw; height: 45vh; touch-action: none;
+      }
+      #stickBase {
+        position: absolute; width: 120px; height: 120px; margin: -60px 0 0 -60px;
+        border-radius: 50%; background: rgba(20, 24, 33, 0.45);
+        border: 2px solid rgba(255, 255, 255, 0.18); pointer-events: none;
+      }
+      #stickZone.active #stickBase { background: rgba(20, 24, 33, 0.6); border-color: rgba(255, 255, 255, 0.3); }
+      #stickKnob {
+        position: absolute; left: 50%; top: 50%; width: 52px; height: 52px; margin: -26px 0 0 -26px;
+        border-radius: 50%; background: rgba(230, 233, 239, 0.55);
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+      }
+      #actions {
+        position: fixed; z-index: 16;
+        right: max(16px, env(safe-area-inset-right)); bottom: max(24px, env(safe-area-inset-bottom));
+        display: flex; flex-direction: column-reverse; align-items: flex-end; gap: 10px;
+      }
+      #actions button {
+        touch-action: manipulation; border: 0; cursor: pointer;
+        font: 700 16px system-ui, sans-serif; color: #2b2418;
+        background: #e8dcb8; border-radius: 999px;
+        min-height: 64px; min-width: 64px; padding: 0 22px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5), inset 0 -3px 0 rgba(0, 0, 0, 0.18);
+      }
+      #actions button:active { transform: translateY(2px); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5); }
+      #actions button.minor {
+        min-height: 44px; font-size: 13px; padding: 0 16px;
+        background: rgba(35, 41, 54, 0.92); color: #e6e9ef;
+      }
     </style>
   </head>
   <body>
     <canvas id="game"></canvas>
 
     <div class="hud">
-      <h1>👻 Haunted Retro</h1>
+      <h1>👻 Haunted Retro <button id="helpBtn" aria-label="How to play">?</button></h1>
       <div class="row">
         <input id="name" placeholder="Your name" maxlength="24" />
       </div>
@@ -95,7 +155,7 @@
         <span class="pill">You hold <b id="myParch">0</b> 📜</span>
         <span class="pill">Seals <b id="seals" class="seals"></b></span>
       </div>
-      <div class="hint">
+      <div class="hint keys">
         <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows to move<br />
         <kbd>E</kbd> grab — a <b>quill</b> ✒️, a <b>parchment</b> 📜, or take one
         parchment from a player who has more than you<br />
@@ -111,6 +171,21 @@
         mallet; push it back off your end to stop<br />
         The number by each avatar is how many parchments they hold.
       </div>
+      <div class="hint touch-hint">
+        Put your thumb anywhere in the lower left and slide to walk.<br />
+        The button on the right does whatever you can do where you're
+        standing: take a <b>quill</b> ✒️ or <b>parchment</b> 📜, write a note
+        at a desk in the <b>Scriptorium</b>, pin it in the room whose question
+        it answers, press a wax seal onto a note, or ring the Lobby bell to
+        show the results.<br />
+        Air hockey in the Library: walk into an end of the table to take its
+        mallet; pull back off your end to stop.
+      </div>
+    </div>
+
+    <div id="touchControls">
+      <div id="stickZone"><div id="stickBase"><div id="stickKnob"></div></div></div>
+      <div id="actions"></div>
     </div>
 
     <div id="writer">
@@ -124,8 +199,8 @@
         </div>
         <textarea id="noteText" maxlength="140" placeholder="Dip your quill…"></textarea>
         <div class="foot">
-          <span><span id="noteLen">0</span>/140 · <kbd>Enter</kbd> to write, <kbd>Esc</kbd> to cancel</span>
-          <button id="noteOk">Write</button>
+          <span><span id="noteLen">0</span>/140<span class="keyhint"> · <kbd>Enter</kbd> to write, <kbd>Esc</kbd> to cancel</span></span>
+          <span><button id="noteCancel" class="secondary">Cancel</button> <button id="noteOk">Write</button></span>
         </div>
       </div>
     </div>
@@ -264,12 +339,20 @@
       resize();
 
       const cam = { x: 0, y: 0 };
+      // Small screens (phones) see the world zoomed out a little, so there's
+      // more of the room around you; never so far that labels get unreadable.
+      let zoom = 1;
+      function fitZoom() { zoom = Math.max(0.7, Math.min(1, Math.min(innerWidth, innerHeight) / 600)); }
+      addEventListener("resize", fitZoom);
+      fitZoom();
 
       // ---- Input --------------------------------------------------------
       const keys = {};
       const nameInput = document.getElementById("name");
+      const GAME_KEYS = new Set(["w", "a", "s", "d", "e", "q", "r", "f", "v", "arrowup", "arrowdown", "arrowleft", "arrowright"]);
       addEventListener("keydown", (e) => {
         if (document.activeElement === nameInput || writerOpen()) return;
+        if (GAME_KEYS.has(e.key.toLowerCase())) setTouchMode(false);
         keys[e.key.toLowerCase()] = true;
         if (e.key.toLowerCase() === "e") send({ type: nearBell() ? "ring" : "grab" }); // server decides what
         if (e.key.toLowerCase() === "q") tryDrop();
@@ -284,12 +367,122 @@
         send({ type: "setName", name: nameInput.value.trim() || "Guest" });
       });
 
+      // ---- Touch mode ---------------------------------------------------
+      // On by default where the main pointer is a finger. Whichever you use
+      // last wins after that: touching the screen shows the thumb stick and
+      // action buttons, pressing a game key hides them again. ?controls=touch
+      // or ?controls=keys in the URL pins it either way.
+      const forcedControls = new URLSearchParams(location.search).get("controls");
+      let touchMode = false;
+      function setTouchMode(on) {
+        if (forcedControls || on === touchMode) return;
+        touchMode = on;
+        document.body.classList.toggle("touch", on);
+        releaseStick(); // also re-places it, now its zone is laid out
+      }
+
+      const hud = document.querySelector(".hud");
+      document.getElementById("helpBtn").addEventListener("click", () => hud.classList.toggle("help"));
+
+      // The thumb stick: press anywhere in its zone and the stick centres
+      // itself under your thumb; slide to walk, further for faster. Its
+      // vector (length 0..1) is read by step() alongside the keys.
+      const STICK_R = 50;          // px of travel for full speed
+      const STICK_DEAD = 0.15;     // ignore tiny wobbles of the thumb
+      const stick = { x: 0, y: 0, id: null, ox: 0, oy: 0 };
+      const stickZone = document.getElementById("stickZone");
+      const stickBase = document.getElementById("stickBase");
+      const stickKnob = document.getElementById("stickKnob");
+      function restStick() {
+        // where the stick waits when nobody's touching it
+        stickBase.style.left = "84px";
+        stickBase.style.top = stickZone.clientHeight - 84 + "px";
+      }
+      function releaseStick() {
+        stick.id = null; stick.x = stick.y = 0;
+        stickZone.classList.remove("active");
+        stickKnob.style.transform = "";
+        restStick();
+      }
+      stickZone.addEventListener("pointerdown", (e) => {
+        if (stick.id !== null) return;
+        e.preventDefault();
+        stick.id = e.pointerId;
+        stickZone.setPointerCapture(e.pointerId);
+        const r = stickZone.getBoundingClientRect();
+        stick.ox = e.clientX; stick.oy = e.clientY;
+        stickBase.style.left = e.clientX - r.left + "px";
+        stickBase.style.top = e.clientY - r.top + "px";
+        stickZone.classList.add("active");
+      });
+      stickZone.addEventListener("pointermove", (e) => {
+        if (e.pointerId !== stick.id) return;
+        let vx = (e.clientX - stick.ox) / STICK_R, vy = (e.clientY - stick.oy) / STICK_R;
+        const m = Math.hypot(vx, vy);
+        if (m > 1) { vx /= m; vy /= m; }
+        stickKnob.style.transform = `translate(${vx * STICK_R}px, ${vy * STICK_R}px)`;
+        // rescale so speed ramps from 0 at the edge of the dead zone to 1 at full travel
+        const len = Math.min(1, m);
+        const k = len < STICK_DEAD ? 0 : (len - STICK_DEAD) / (1 - STICK_DEAD) / len;
+        stick.x = vx * k; stick.y = vy * k;
+      });
+      for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) {
+        stickZone.addEventListener(ev, (e) => { if (e.pointerId === stick.id) releaseStick(); });
+      }
+      addEventListener("resize", () => { if (stick.id === null) restStick(); });
+
+      if (forcedControls) {
+        touchMode = forcedControls === "touch";
+        document.body.classList.toggle("touch", touchMode);
+      } else {
+        setTouchMode(matchMedia("(pointer: coarse)").matches);
+        addEventListener("pointerdown", (e) => { if (e.pointerType === "touch") setTouchMode(true); }, true);
+      }
+      restStick();
+
+      // Context buttons: whatever you could do by key where you're standing.
+      // The first is the big one; the list is only rebuilt when it changes.
+      const actionsEl = document.getElementById("actions");
+      let actionsKey = "";
+      function touchActions() {
+        const p = me();
+        if (!p || myMallet || writerOpen()) return [];
+        const out = [];
+        if (nearBell()) out.push({ label: results ? "🔔 Reopen voting" : "🔔 Show results", run: () => send({ type: "ring" }) });
+        if (canWrite()) out.push({ label: "✒️ Write", run: openWriter });
+        if (canPin()) out.push({ label: "📌 Pin note", run: () => send({ type: "pin" }) });
+        const t = !nearBell() && nearestTarget();
+        if (t) out.push({ label: t.kind === "quill" ? "✒️ Take quill" : "📜 Take parchment", run: () => send({ type: "grab" }) });
+        const n = !results && noteNear();
+        if (n) {
+          const left = maxSeals - myBallot.length;
+          if (myBallot.includes(n.id)) out.push({ label: "Take seal back", run: () => send({ type: "vote" }) });
+          else if (left > 0) out.push({ label: `🔴 Seal it (${left} left)`, run: () => send({ type: "vote" }) });
+        }
+        if (p.carrying) out.push({ label: "Drop quill", run: tryDrop, minor: true });
+        return out;
+      }
+      function renderActions() {
+        const list = touchMode ? touchActions() : [];
+        const key = list.map((a) => a.label).join("|");
+        if (key === actionsKey) return;
+        actionsKey = key;
+        actionsEl.replaceChildren(...list.map((a, i) => {
+          const b = document.createElement("button");
+          b.textContent = a.label;
+          if (a.minor || i > 0) b.className = "minor";
+          b.addEventListener("pointerdown", (e) => { e.preventDefault(); a.run(); });
+          return b;
+        }));
+      }
+
       // ---- Writing overlay ---------------------------------------------
       const writer = document.getElementById("writer");
       const noteText = document.getElementById("noteText");
       function writerOpen() { return writer.classList.contains("open"); }
       function openWriter() {
         for (const k in keys) keys[k] = false; // stop walking while writing
+        releaseStick();
         noteText.value = "";
         document.getElementById("noteLen").textContent = "0";
         writer.classList.add("open");
@@ -309,6 +502,7 @@
         if (e.key === "Escape") closeWriter();
       });
       document.getElementById("noteOk").addEventListener("click", submitNote);
+      document.getElementById("noteCancel").addEventListener("click", closeWriter);
       writer.addEventListener("click", (e) => { if (e.target === writer) closeWriter(); });
 
       // ---- WebSocket wiring --------------------------------------------
@@ -453,12 +647,13 @@
       }
 
       // While I hold an end, the movement keys drive my mallet. Pushing it
-      // against my own end for a moment lets go of the table.
+      // against my own end for a moment lets go of the table. (dx, dy) is
+      // at most unit length; shorter from a lightly pushed thumb stick.
       function moveMallet(dx, dy) {
         const end = myEnd(), b = malletBounds(end);
-        const len = Math.hypot(dx, dy) || 1, speed = frames * SPEED * MALLET_SPEED;
-        const x = Math.max(b.x0, Math.min(b.x1, myMallet.x + (dx / len) * speed));
-        const y = Math.max(b.y0, Math.min(b.y1, myMallet.y + (dy / len) * speed));
+        const speed = frames * SPEED * MALLET_SPEED;
+        const x = Math.max(b.x0, Math.min(b.x1, myMallet.x + dx * speed));
+        const y = Math.max(b.y0, Math.min(b.y1, myMallet.y + dy * speed));
         const pushingOff = end === "top" ? dy < 0 && y <= b.y0 : dy > 0 && y >= b.y1;
         malletPull = pushingOff ? malletPull + frames / 60 : 0;
         if (malletPull > LEAVE_PULL) {
@@ -673,15 +868,17 @@
           if (keys["s"] || keys["arrowdown"]) dy += 1;
           if (keys["a"] || keys["arrowleft"]) dx -= 1;
           if (keys["d"] || keys["arrowright"]) dx += 1;
+          const keyLen = Math.hypot(dx, dy);
+          if (keyLen) { dx /= keyLen; dy /= keyLen; }
+          else { dx = stick.x; dy = stick.y; }
           if (myMallet) {
             if (dx || dy) moveMallet(dx, dy); else malletPull = 0;
           } else if (dx || dy) {
-            const len = Math.hypot(dx, dy) || 1;
             // The more parchments you carry, the slightly slower you move —
             // so someone with fewer can always catch up and grab one.
             const speed = frames * SPEED * Math.max(MIN_SPEED_FACTOR, 1 - PARCH_SLOWDOWN * (p.parchments || 0));
-            p.x = Math.max(0, Math.min(world.w, p.x + (dx / len) * speed));
-            p.y = Math.max(0, Math.min(world.h, p.y + (dy / len) * speed));
+            p.x = Math.max(0, Math.min(world.w, p.x + dx * speed));
+            p.y = Math.max(0, Math.min(world.h, p.y + dy * speed));
             collideWalls(p); // push back out of any wall we walked into
             tryJoinHockey(p, dy);
             if (p.carrying && quills[p.carrying]) {
@@ -694,13 +891,15 @@
               lastSent = now;
             }
           }
-          const targetX = p.x - innerWidth / 2;
-          const targetY = p.y - innerHeight / 2;
+          const viewW = innerWidth / zoom, viewH = innerHeight / zoom;
+          const targetX = p.x - viewW / 2;
+          const targetY = p.y - viewH / 2;
           cam.x += (targetX - cam.x) * ease(0.12);
           cam.y += (targetY - cam.y) * ease(0.12);
-          cam.x = Math.max(-100, Math.min(world.w - innerWidth + 100, cam.x));
-          cam.y = Math.max(-100, Math.min(world.h - innerHeight + 100, cam.y));
+          cam.x = Math.max(-100, Math.min(world.w - viewW + 100, cam.x));
+          cam.y = Math.max(-100, Math.min(world.h - viewH + 100, cam.y));
         }
+        renderActions();
 
         // Smoothly interpolate every OTHER player toward its target position.
         for (const id in players) {
@@ -730,6 +929,7 @@
         ctx.fillStyle = "#0e1116";
         ctx.fillRect(0, 0, innerWidth, innerHeight);
 
+        ctx.scale(zoom, zoom);
         ctx.translate(-cam.x, -cam.y);
 
         drawGrid();
@@ -1072,6 +1272,10 @@
         drawNoteCard(n, x, y, 1, true);
       }
 
+      // "E — take quill" with a keyboard. In touch mode the action button
+      // already says it, so the hint is dropped.
+      function keyed(key, text) { return touchMode ? null : `${key} — ${text}`; }
+
       // Contextual help pinned to the bottom of the screen.
       function drawActionHint() {
         const p = me();
@@ -1079,31 +1283,33 @@
         let text = null;
         const tableEnd = hockeyEndNear();
         if (myMallet) {
-          text = "Move to steer your mallet · push back off your end to stop playing";
+          text = touchMode ? "Slide to steer your mallet · pull back off your end to stop"
+               : "Move to steer your mallet · push back off your end to stop playing";
         } else if (tableEnd) {
           text = hk && hk.ends[tableEnd] ? "Someone's playing at this end"
                : "Walk into the end of the table to play air hockey";
         } else if (nearBell()) {
-          text = results ? "E — ring the bell to reopen voting" : "E — ring the bell to show the results";
+          text = keyed("E", results ? "ring the bell to reopen voting" : "ring the bell to show the results");
         } else if (p.note) {
           const a = namedAreaAt(p);
           text = results && a?.prompt ? "Results are showing — ring the Lobby bell to reopen the board"
-               : a?.prompt ? `F — pin your note in the ${a.name}`
+               : a?.prompt ? keyed("F", `pin your note in the ${a.name}`)
                : "Carry your note to the Workshop, Garden or Library";
         } else if (atDesk()) {
-          text = canWrite() ? "R — write a note"
+          text = canWrite() ? keyed("R", "write a note")
                : !p.carrying ? "You need a quill to write"
                : "You need a blank parchment to write";
         } else if (noteNear() && results) {
           text = "Voting is closed while the results are showing";
         } else if (noteNear()) {
           const left = maxSeals - myBallot.length;
-          text = myBallot.includes(noteNear().id) ? "V — take your seal back"
-               : left > 0 ? `V — press a seal onto this note (${left} left)`
+          text = myBallot.includes(noteNear().id) ? keyed("V", "take your seal back")
+               : left > 0 ? keyed("V", `press a seal onto this note (${left} left)`)
                : "No seals left — take one back from another note";
         }
         if (!text) return;
-        drawPill(text, innerHeight - 64);
+        // in touch mode, sit above the stick and buttons
+        drawPill(text, innerHeight - (touchMode ? 190 : 64), undefined, true);
       }
 
       // Announcements after the bell, and a reminder while results show.
@@ -1113,17 +1319,27 @@
         else if (results) drawPill("🏆 Results — voting is closed. Ring the Lobby bell to reopen.", 16, "rgba(90,60,20,0.85)");
       }
 
-      function drawPill(text, y, bg = "rgba(20,24,33,0.88)") {
+      // A rounded label centred across the screen, wrapped onto more lines if
+      // the screen's too narrow. A top pill that would run into the HUD drops
+      // below it; a bottom one (fromBottom) grows upward from y instead.
+      function drawPill(text, y, bg = "rgba(20,24,33,0.88)", fromBottom = false) {
         ctx.save();
         ctx.scale(dpr, dpr);
         ctx.font = "600 14px system-ui, sans-serif";
-        const w = ctx.measureText(text).width + 28;
+        const lines = wrapLines(text, innerWidth - 24 - 28, 3);
+        const w = Math.max(...lines.map((l) => ctx.measureText(l).width)) + 28;
+        const h = 32 + (lines.length - 1) * 18;
         const x = innerWidth / 2 - w / 2;
+        if (fromBottom) y -= h - 32;
+        else {
+          const r = hud.getBoundingClientRect();
+          if (x < r.right + 8 && y < r.bottom + 8) y = r.bottom + 8;
+        }
         ctx.fillStyle = bg;
-        roundRect(x, y, w, 32, 16); ctx.fill();
+        roundRect(x, y, w, h, 16); ctx.fill();
         ctx.fillStyle = "#e6e9ef";
         ctx.textAlign = "center";
-        ctx.fillText(text, innerWidth / 2, y + 21);
+        lines.forEach((l, i) => ctx.fillText(l, innerWidth / 2, y + 21 + i * 18));
         ctx.restore();
       }
 
@@ -1391,10 +1607,10 @@
         ctx.fillStyle = "rgba(255,255,255,0.9)";
         ctx.font = "600 12px system-ui, sans-serif";
         ctx.textAlign = "center";
-        const label = t.kind === "quill" ? "E — take quill"
-                    : t.kind === "parch" ? "E — take parchment"
-                    : "E — take a parchment";
-        ctx.fillText(label, t.x, t.y - r - 6);
+        const label = t.kind === "quill" ? "take quill"
+                    : t.kind === "parch" ? "take parchment"
+                    : "take a parchment";
+        ctx.fillText(touchMode ? label : `E — ${label}`, t.x, t.y - r - 6);
         ctx.textAlign = "left";
       }
 

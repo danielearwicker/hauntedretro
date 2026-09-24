@@ -31,6 +31,10 @@ URL (e.g. `http://127.0.0.1:8787/#sprint-42`) to create separate rooms.
   holds more than you
 - **Q** — drop your quill
 - Walk into a pumpkin or barrel to send it rolling
+- Mind the Lobby ghost: pass too close while holding a quill and it snatches
+  it and flies off at four times its usual speed. Catch it and press **E** to
+  snatch the quill back; otherwise it drops it somewhere in the Lobby after a
+  few seconds. It rests for 20 seconds after each theft.
 - **Air hockey** in the Library: walk into an end of the table to take its
   mallet, steer it with your movement keys, and push it back off your end to
   stop. With two players a score is kept (reset when the second player joins).

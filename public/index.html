@@ -458,7 +458,10 @@
         if (canWrite()) out.push({ label: "✒️ Write", run: openWriter });
         if (canPin()) out.push({ label: "📌 Pin note", run: () => send({ type: "pin" }) });
         const t = !nearBell() && nearestTarget();
-        if (t) out.push({ label: t.kind === "quill" ? "✒️ Take quill" : "📜 Take parchment", run: () => send({ type: "grab" }) });
+        if (t) out.push({
+          label: t.kind === "quill" ? "✒️ Take quill" : t.kind === "ghost" ? "👻 Snatch it back!" : "📜 Take parchment",
+          run: () => send({ type: "grab" }),
+        });
         const n = !results && noteNear();
         if (n) {
           const left = maxSeals - myBallot.length;
@@ -557,6 +560,7 @@
         switch (msg.type) {
           case "init":
             myId = msg.you;
+            if (msg.now) clockSkew = msg.now - Date.now();
             if (msg.map) {
               walls = msg.map.walls || []; areas = msg.map.areas || [];
               desks = msg.map.desks || []; decor = msg.map.decor || [];
@@ -580,6 +584,14 @@
               until: performance.now() + 4000,
             };
             break;
+          case "ghost": {
+            const text = msg.dropped ? "👻 The ghost dropped a quill somewhere in the Lobby"
+                       : msg.rescuedBy ? (msg.rescuedBy === myId ? "👻 You snatched the quill back!" : `👻 ${msg.name} snatched the quill back!`)
+                       : msg.from === myId ? "👻 The ghost snatched your quill — catch it!"
+                       : `👻 The ghost snatched ${msg.name}'s quill!`;
+            banner = { text, until: performance.now() + 3500 };
+            break;
+          }
           case "reset":
             for (const id in noteDraw) delete noteDraw[id];
             banner = { text: `🧹 ${msg.by} cleared the board`, until: performance.now() + 4000 };
@@ -622,6 +634,7 @@
         parchments = s.parchments;
         notes = s.notes || [];
         results = !!s.results;
+        if (s.ghost) ghostClock = s.ghost;
         if (s.hockey) applyHockey(s.hockey);
         const oldMovers = movers;
         movers = {};
@@ -792,6 +805,11 @@
             if (q.heldBy) continue;
             const d = Math.hypot(q.x - p.x, q.y - p.y);
             if (d <= GRAB_RANGE && d < bestD) { bestD = d; best = { x: q.x, y: q.y }; kind = "quill"; }
+          }
+          if (ghostHasQuill()) {
+            const g = ghostAt(), gy = g.y + GHOST_FOOT;
+            const d = Math.hypot(g.x - p.x, gy - p.y);
+            if (d <= GRAB_RANGE && d < bestD) { bestD = d; best = { x: g.x, y: g.y }; kind = "ghost"; }
           }
         }
         for (const pc of parchments) {
@@ -1165,14 +1183,37 @@
       }
 
       // The resident ghost drifts around the Lobby. Its path is a function of
-      // the wall clock, so everyone sees it in roughly the same place.
+      // the server's clock, so everyone sees it where the server thinks it is
+      // — which matters, because it snatches quills. Mirrors ghostPos() there.
+      // While it has a quill its path's clock runs `sprint` times faster, so
+      // it flies off with it; `boost` is how far ahead earlier sprints left it.
+      let clockSkew = 0; // server time minus ours, from init
+      let ghostClock = { boost: 0, since: null, sprint: 1 }; // from snapshots
+      const GHOST_FOOT = 30; // must match the server
+      function ghostAt() {
+        const now = Date.now() + clockSkew, g = ghostClock;
+        const t = (now + g.boost + (g.since != null ? (now - g.since) * (g.sprint - 1) : 0)) / 1000;
+        return {
+          t,
+          x: 1600 + 230 * Math.sin(t * 0.13),
+          y: 1320 + 160 * Math.sin(t * 0.21) + 5 * Math.sin(t * 2.2),
+          facingLeft: Math.cos(t * 0.13) < 0,
+        };
+      }
+      function ghostHasQuill() { return Object.values(quills).some((q) => q.heldBy === "ghost"); }
       function drawGhost() {
         const sp = sprites.ghost;
         if (!sp) return;
-        const t = Date.now() / 1000;
-        const x = 1600 + 230 * Math.sin(t * 0.13);
-        const y = 1320 + 160 * Math.sin(t * 0.21) + 5 * Math.sin(t * 2.2);
-        const facingLeft = Math.cos(t * 0.13) < 0;
+        const { t, x, y, facingLeft } = ghostAt();
+        // a stolen quill, waved about at arm's length
+        if (ghostHasQuill()) {
+          ctx.save();
+          ctx.shadowColor = "rgba(200,210,255,0.8)"; ctx.shadowBlur = 12;
+          ctx.translate(x + (facingLeft ? -20 : 20), y + 4);
+          ctx.rotate(0.5 * Math.sin(t * 5));
+          drawQuill(0, 0, 0.9);
+          ctx.restore();
+        }
         ctx.save();
         ctx.globalAlpha = 0.45 + 0.15 * Math.sin(t * 0.7);
         ctx.fillStyle = "rgba(0,0,0,0.25)";
@@ -1645,6 +1686,7 @@
         ctx.textAlign = "center";
         const label = t.kind === "quill" ? "take quill"
                     : t.kind === "parch" ? "take parchment"
+                    : t.kind === "ghost" ? "snatch it back!"
                     : "take a parchment";
         ctx.fillText(touchMode ? label : `E — ${label}`, t.x, t.y - r - 6);
         ctx.textAlign = "left";

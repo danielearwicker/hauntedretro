@@ -91,6 +91,25 @@ const VOTES_PER_PLAYER = 3;
 const BELL = { x: 1460, y: 1052 }; // in the Lobby, by the Scriptorium door
 const BELL_RANGE = 48;
 
+// The resident ghost drifts around the Lobby on a path set by the clock (the
+// server's: clients are told its time), so everyone sees it in the same place.
+// It snatches the quill from anyone it floats into and flies off with it,
+// faster, for a few seconds — catch it and grab to take the quill back — then
+// drops it on clear floor wherever it's got to. Must match the client.
+// `phase` is the clock its path follows: real time, run faster while it
+// holds a quill (see Main.ghostPhase).
+function ghostPos(phase: number) {
+  const t = phase / 1000;
+  return { x: 1600 + 230 * Math.sin(t * 0.13), y: 1320 + 160 * Math.sin(t * 0.21) + 5 * Math.sin(t * 2.2) };
+}
+const GHOST = "ghost";               // a quill's heldBy while the ghost has it
+const GHOST_FOOT = 30;               // its ground point is this far below its centre
+const GHOST_REACH = 30;              // how near your feet it must pass to snatch
+const GHOST_HOLD_MS = [3000, 7000];  // how long it keeps a quill
+const GHOST_REST_MS = 20000;         // after dropping one, before it'll snatch again
+const GHOST_TICK_MS = 200;
+const GHOST_SPRINT = 4;              // how much faster it flies with a quill
+
 // Card slots in a column room at a given scale, as centre points in row-major order.
 function noteSlots(room: Area, scale: number) {
   const a = room.notes ?? room;
@@ -387,6 +406,10 @@ export class Main extends Server<Env> {
     dirty: false, // something changed since the last broadcast
   };
   hockeyTicker: ReturnType<typeof setInterval> | null = null;
+  // boost: how far its path's clock has run ahead of real time from past
+  // sprints; since: when the current one (holding `quill`) began
+  ghost = { quill: null as string | null, dropAt: 0, restUntil: 0, boost: 0, since: 0 };
+  ghostTicker: ReturnType<typeof setInterval> | null = null;
   // players whose connection dropped, by voter id, waiting to be resumed
   parked: Record<string, { player: Player; timer: ReturnType<typeof setTimeout> }> = {};
   nextId = 1;
@@ -444,10 +467,13 @@ export class Main extends Server<Env> {
       for (let i = 0; i < 3; i++) this.parchments.push({ id: this.mkId("parch"), ...this.spawnPos() });
     }
 
+    this.ghostTicker ??= setInterval(() => this.tickGhost(), GHOST_TICK_MS);
+
     // Map (static geometry) sent only on init; snapshots don't resend it.
     conn.send(JSON.stringify({
       type: "init",
       you: conn.id,
+      now: Date.now(), // so the client's ghost keeps to our clock
       map: {
         world: WORLD, walls: WALLS, areas: AREAS, desks: DESKS, decor: STATIC_DECOR, bell: BELL, solids: SOLIDS,
         hockey: HOCKEY,
@@ -588,7 +614,7 @@ export class Main extends Server<Env> {
       case "grab": {
         let best: any = null;
         let bestD = GRAB_RANGE + 1;
-        let kind: "quill" | "parch" | "steal" | null = null;
+        let kind: "quill" | "parch" | "steal" | "ghost" | null = null;
 
         if (!player.carrying) {
           for (const q of this.quills) {
@@ -596,6 +622,10 @@ export class Main extends Server<Env> {
             const d = dist(q, player);
             if (d <= GRAB_RANGE && d < bestD) { bestD = d; best = q; kind = "quill"; }
           }
+          // catch the ghost and you can take its quill off it
+          const q = this.ghost.quill && this.quills.find((q) => q.id === this.ghost.quill);
+          const d = q ? dist(this.ghostFeet(Date.now()), player) : Infinity;
+          if (d <= GRAB_RANGE && d < bestD) { bestD = d; best = q; kind = "ghost"; }
         }
         for (const pc of this.parchments) {
           const d = dist(pc, player);
@@ -611,6 +641,11 @@ export class Main extends Server<Env> {
         }
 
         if (kind === "quill") { best.heldBy = player.id; player.carrying = best.id; }
+        else if (kind === "ghost") {
+          best.heldBy = player.id; player.carrying = best.id;
+          this.releaseGhostQuill(Date.now());
+          this.broadcast(JSON.stringify({ type: "ghost", rescuedBy: player.id, name: player.name }));
+        }
         else if (kind === "parch") { this.parchments = this.parchments.filter((p) => p !== best); player.parchments++; }
         else if (kind === "steal") { best.parchments--; player.parchments++; }
         if (kind) this.pushSnapshot();
@@ -829,7 +864,60 @@ export class Main extends Server<Env> {
     this.leaveHockey(conn.id);
     if (player?.voter) this.park(player);
     else if (player) this.dropBelongings(player);
+    if (!Object.keys(this.players).length && this.ghostTicker) {
+      clearInterval(this.ghostTicker);
+      this.ghostTicker = null;
+    }
     this.pushSnapshot();
+  }
+
+  ghostPhase(now: number) {
+    const gh = this.ghost;
+    return now + gh.boost + (gh.quill ? (now - gh.since) * (GHOST_SPRINT - 1) : 0);
+  }
+
+  // The point on the floor under the ghost, where it snatches and drops.
+  ghostFeet(now: number) {
+    const g = ghostPos(this.ghostPhase(now));
+    return { x: g.x, y: g.y + GHOST_FOOT };
+  }
+
+  // The ghost lets go of its quill (dropped or taken back) and slows down.
+  releaseGhostQuill(now: number) {
+    const gh = this.ghost;
+    gh.boost = this.ghostPhase(now) - now; // bank the sprint so it doesn't jump back
+    gh.quill = null;
+    gh.restUntil = now + GHOST_REST_MS;
+  }
+
+  tickGhost() {
+    const now = Date.now(), gh = this.ghost;
+    const feet = this.ghostFeet(now);
+    if (gh.quill) {
+      const q = this.quills.find((q) => q.id === gh.quill);
+      if (!q || q.heldBy !== GHOST) { this.releaseGhostQuill(now); this.pushSnapshot(); return; }
+      // hold on until its time's up and it's over floor someone can reach
+      if (now < gh.dropAt || SOLIDS.some((s) => contact(feet.x, feet.y, 16, s))) return;
+      Object.assign(q, { heldBy: null, ...feet });
+      this.releaseGhostQuill(now);
+      this.broadcast(JSON.stringify({ type: "ghost", dropped: true }));
+      this.pushSnapshot();
+      return;
+    }
+    if (now < gh.restUntil) return;
+    for (const p of Object.values(this.players)) {
+      if (!p.carrying || dist(p, feet) > GHOST_REACH) continue;
+      const q = this.quills.find((q) => q.id === p.carrying);
+      p.carrying = null;
+      if (!q) continue;
+      q.heldBy = GHOST;
+      gh.quill = q.id;
+      gh.since = now;
+      gh.dropAt = now + GHOST_HOLD_MS[0] + Math.random() * (GHOST_HOLD_MS[1] - GHOST_HOLD_MS[0]);
+      this.broadcast(JSON.stringify({ type: "ghost", from: p.id, name: p.name }));
+      this.pushSnapshot();
+      return;
+    }
   }
 
   // A player whose connection dropped is kept out of sight, belongings and
@@ -994,6 +1082,7 @@ export class Main extends Server<Env> {
     return {
       world: WORLD, players, quills: this.quills, parchments: this.parchments,
       notes: this.notes, results: this.results,
+      ghost: { boost: this.ghost.boost, since: this.ghost.quill ? this.ghost.since : null, sprint: GHOST_SPRINT },
       movers: this.movers.map(({ id, kind, x, y, a, r }) => ({ id, kind, x, y, a, r })),
       hockey: this.hockeyState(),
     };
